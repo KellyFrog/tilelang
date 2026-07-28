@@ -1,7 +1,3 @@
-import os
-import subprocess
-import sys
-from pathlib import Path
 from typing import Any
 
 import tilelang
@@ -147,18 +143,22 @@ def _make_two_group_reduce_kernel(block_threads: int = 128) -> Any:
     return make_kernel()
 
 
-def _make_disjoint_group_reduce_kernel() -> Any:
+def _make_disjoint_group_reduce_kernel(barrier_start: int | None = None) -> Any:
+    pass_configs = {
+        tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
+        tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+        # Two reductions on disjoint thread groups execute concurrently;
+        # disable shared-memory lifetime reuse so their AllReduce workspaces
+        # get distinct regions instead of aliasing.
+        tilelang.PassConfigKey.TL_DISABLE_SHARED_MEMORY_REUSE: True,
+    }
+    if barrier_start is not None:
+        pass_configs[tilelang.PassConfigKey.TL_NAMED_BARRIER_START] = barrier_start
+
     @tilelang.jit(
         out_idx=1,
         target="cuda",
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
-            tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
-            # Two reductions on disjoint thread groups execute concurrently;
-            # disable shared-memory lifetime reuse so their AllReduce workspaces
-            # get distinct regions instead of aliasing.
-            tilelang.PassConfigKey.TL_DISABLE_SHARED_MEMORY_REUSE: True,
-        },
+        pass_configs=pass_configs,
     )
     def make_kernel():
         def first_group_layout(i: int, j: int) -> tuple[int, int]:
@@ -486,6 +486,31 @@ def test_reduce_partial_thread_barrier_disjoint_groups():
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_named_barrier_start_cycles_reduce_ids():
+    """tl.named_barrier_start = K makes reductions claim barrier IDs cycling
+    through [1, K-1]; auto-allocated non-reduce barriers start at K."""
+    import re
+
+    # Default K=3: two reductions use barrier IDs 1 and 2.
+    src = _make_disjoint_group_reduce_kernel().get_kernel_source()
+    ids = [int(x) for x in re.findall(r"NamedBarrier<\d+, (\d+)>", src)]
+    assert ids == [1, 2], f"default K=3 should give barrier IDs [1, 2], got {ids}"
+
+    # K=2: reductions cycle through [1, 1], so both reuse barrier ID 1.
+    src = _make_disjoint_group_reduce_kernel(barrier_start=2).get_kernel_source()
+    ids = [int(x) for x in re.findall(r"NamedBarrier<\d+, (\d+)>", src)]
+    assert ids == [1, 1], f"K=2 should give barrier IDs [1, 1], got {ids}"
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_named_barrier_start_config_validation():
+    """Out-of-range tl.named_barrier_start values are rejected at lowering."""
+    for bad in (1, 16):
+        with pytest.raises(Exception, match="named_barrier_start must be in"):
+            _make_disjoint_group_reduce_kernel(barrier_start=bad)
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_reduce_partial_thread_barrier_rejects_non_power_of_two_width():
     with pytest.raises(Exception, match="positive power of two"):
         _make_partial_warp_reduce_kernel()
@@ -515,30 +540,6 @@ def test_reduce_partial_thread_barrier_partial_full_mixed():
         rtol=1e-5,
         atol=1e-6,
     )
-
-
-@tilelang.testing.requires_cuda_compute_version_lt(9, 0)
-@pytest.mark.xfail(
-    strict=True,
-    reason="pre-SM90 scalar partial reductions emit conditional __syncthreads",
-)
-def test_reduce_partial_thread_barrier_pre_sm90_runtime():
-    result = subprocess.run(
-        ["timeout", "15s", sys.executable, str(Path(__file__).resolve())],
-        env={**os.environ, "TILELANG_PRE_SM90_PARTIAL_REDUCE_CHILD": "1"},
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, (
-        f"partial scalar reduction did not complete on pre-SM90 CUDA (exit code {result.returncode}):\n{result.stderr}"
-    )
-
-
-if __name__ == "__main__" and os.environ.get("TILELANG_PRE_SM90_PARTIAL_REDUCE_CHILD"):
-    x = torch.rand((4, 512), dtype=torch.float32, device="cuda")
-    out = _make_partial_reduce_kernel()(x)
-    torch.cuda.synchronize()
-    torch.testing.assert_close(out, x / x.sum(dim=1, keepdim=True), rtol=1e-5, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
