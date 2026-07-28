@@ -185,6 +185,11 @@ class PassConfigKey(str, Enum):
     optimization in cases where manual synchronization is preferred or when
     synchronization is not needed. Default: False"""
 
+    TL_NAMED_BARRIER_START = "tl.named_barrier_start"
+    """First named-barrier (bar.sync) ID handed to reductions. Default: 1, which
+    keeps the first AllReduce on barrier ID 1. Must be in [1, 15]; ID 0 is
+    reserved for __syncthreads and hardware provides named barriers 1..15."""
+
     TL_FORCE_LET_INLINE = "tl.force_let_inline"
     """Force TileLang to inline let bindings during simplification. Default: False"""
 

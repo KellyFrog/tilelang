@@ -9,6 +9,8 @@
 #include <tvm/ffi/optional.h>
 #include <tvm/ir/transform.h>
 
+#include "op/builtin.h"
+
 namespace tvm {
 namespace tl {
 namespace tl_config {
@@ -42,10 +44,15 @@ inline bool Vectorize256Disabled() {
  */
 inline int NamedBarrierStart() {
   auto ctxt = ::tvm::transform::PassContext::Current();
-  return static_cast<int>(
-      ctxt->GetConfig("tl.named_barrier_start", ffi::Optional<Integer>())
+  int start = static_cast<int>(
+      ctxt->GetConfig(kNamedBarrierStart, ffi::Optional<Integer>())
           .value_or(Integer(1))
           ->value);
+  // Hardware provides named barriers 1..15 (0 is __syncthreads).
+  if (start < 1 || start > 15) {
+    LOG(FATAL) << "tl.named_barrier_start must be in [1, 15], got " << start;
+  }
+  return start;
 }
 
 } // namespace tl_config

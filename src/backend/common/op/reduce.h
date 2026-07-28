@@ -26,6 +26,7 @@
 #include <tvm/tirx/stmt_functor.h>
 
 #include "backend/common/target_utils.h"
+#include "transform/common/thread_sync_types.h"
 
 #include <algorithm>
 #include <cmath>
@@ -294,6 +295,15 @@ inline int ClaimNamedBarrier(const LowerArgs &lower_args) {
     return 1;
   }
   int id = *lower_args.named_barrier_next_id;
+  if (id > kMaxNamedBarrier) {
+    LOG(FATAL) << "tl.reduce: named-barrier ID exhaustion: this kernel needs "
+                  "more than "
+               << kMaxNamedBarrier - 1 << " cross-warp named barriers (IDs 1.."
+               << kMaxNamedBarrier
+               << "; ID 0 is reserved for __syncthreads). Combine reductions "
+                  "into a batch reduction or reduce the number of "
+                  "reductions/ThreadSync barrier groups.";
+  }
   *lower_args.named_barrier_next_id = id + 1;
   return id;
 }

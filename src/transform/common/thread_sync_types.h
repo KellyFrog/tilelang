@@ -31,6 +31,10 @@ enum class ReservedNamedBarriers : uint8_t {
   kFirstUsedBarrier = kReduce_1 + 1
 };
 
+// Highest valid named-barrier ID. Hardware provides IDs 0..15; ID 0 is
+// reserved for __syncthreads, so named barriers use 1..15.
+static constexpr int kMaxNamedBarrier = 15;
+
 } // namespace tl
 } // namespace tvm
 

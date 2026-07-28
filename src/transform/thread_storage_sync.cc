@@ -328,6 +328,14 @@ private:
     }
 
     size_t barrier_id = barrier_id_map_.size() + base_barrier_id_;
+    if (barrier_id > static_cast<size_t>(kMaxNamedBarrier)) {
+      LOG(FATAL) << "[ThreadSync] named-barrier ID exhaustion: this kernel "
+                    "needs more than "
+                 << kMaxNamedBarrier - 1
+                 << " cross-warp named barriers (IDs 1.." << kMaxNamedBarrier
+                 << "; ID 0 is reserved for __syncthreads). Reduce the number "
+                    "of divergent shared-memory sync regions or reductions.";
+    }
     size_t thread_count = extent_tx * extent_ty * extent_tz;
 
     barrier_id_map_[key] = barrier_id;
