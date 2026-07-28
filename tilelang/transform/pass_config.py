@@ -186,9 +186,13 @@ class PassConfigKey(str, Enum):
     synchronization is not needed. Default: False"""
 
     TL_NAMED_BARRIER_START = "tl.named_barrier_start"
-    """First named-barrier (bar.sync) ID handed to reductions. Default: 1, which
-    keeps the first AllReduce on barrier ID 1. Must be in [1, 15]; ID 0 is
-    reserved for __syncthreads and hardware provides named barriers 1..15."""
+    """First auto-allocated (non-reduce) named-barrier (bar.sync) ID. Default: 3.
+
+    Reductions claim barrier IDs cycling through [1, start - 1] (one ID per
+    reduction, reused across butterfly phases as barrier generations); the
+    default 3 keeps barrier IDs 1 and 2 for reductions. Auto-allocated
+    non-reduce barriers (ThreadSync shared-memory syncs) start at this value.
+    Must be in [2, 15]; ID 0 is reserved for __syncthreads."""
 
     TL_FORCE_LET_INLINE = "tl.force_let_inline"
     """Force TileLang to inline let bindings during simplification. Default: False"""

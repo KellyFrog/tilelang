@@ -140,15 +140,18 @@ struct LowerArgs {
   // alignment implied by the chosen swizzle mode here; LowerTileOp collects
   // the results into the kSmemAlignmentMap PrimFunc attribute.
   RequireSmemAlignmentCallback require_smem_alignment = nullptr;
-  // Per-kernel named-barrier (bar.sync) ID allocator. `bar.sync id, n`: id 0
-  // is reserved for __syncthreads. Every AllReduce that emits a NamedBarrier
-  // claims a barrier ID from this allocator (one per reduction, since a single
-  // reduction reuses its one barrier ID across butterfly phases as
-  // generations), so multiple reductions (tl.reduce, tl.finalize_reducer) in
-  // one kernel never reuse the same barrier ID and interleave their barrier
-  // arrivals. Points to the next free ID in a LowerTileOpPass member; nullptr
-  // falls back to the legacy fixed ID 1.
+  // Per-kernel named-barrier (bar.sync) allocator for reductions. `bar.sync
+  // id, n`: id 0 is reserved for __syncthreads. Every AllReduce that emits a
+  // NamedBarrier claims a barrier ID from this allocator (one per reduction,
+  // since a single reduction reuses its one barrier ID across butterfly phases
+  // as generations). IDs cycle through [1, named_barrier_cycle]; auto-allocated
+  // non-reduce barriers (ThreadSync) start at named_barrier_cycle + 1 =
+  // tl.named_barrier_start. Points to the next free ID in a LowerTileOpPass
+  // member; nullptr falls back to the legacy fixed ID 1.
   int *named_barrier_next_id = nullptr;
+  // Reduce barrier IDs cycle through [1, named_barrier_cycle] (default 2, i.e.
+  // barrier IDs 1 and 2 for reductions; auto-allocated barriers start at 3).
+  int named_barrier_cycle = 1;
 };
 
 struct LayoutInferArgs {

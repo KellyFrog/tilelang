@@ -35,22 +35,22 @@ inline bool Vectorize256Disabled() {
 }
 
 /*!
- * \brief First named-barrier (bar.sync) ID handed out to reductions.
+ * \brief First auto-allocated (non-reduce) named-barrier (bar.sync) ID.
  *
- * Barrier ID 0 is reserved for __syncthreads. The default 1 keeps the first
- * AllReduce in a kernel on barrier ID 1, preserving the legacy codegen for
- * single-reduction kernels. Subsequent AllReduces rotate through 2, 3, ... so
- * multiple reductions never collide.
+ * Reductions claim barrier IDs cycling through [1, K-1] (one ID per reduction,
+ * reused across butterfly phases as generations), and auto-allocated barriers
+ * (ThreadSync shared-memory syncs) start at K. Barrier ID 0 is reserved for
+ * __syncthreads and hardware provides IDs 0..15, so K is in [2, 15]. The
+ * default 3 keeps barrier IDs 1 and 2 for reductions.
  */
 inline int NamedBarrierStart() {
   auto ctxt = ::tvm::transform::PassContext::Current();
   int start = static_cast<int>(
       ctxt->GetConfig(kNamedBarrierStart, ffi::Optional<Integer>())
-          .value_or(Integer(1))
+          .value_or(Integer(3))
           ->value);
-  // Hardware provides named barriers 1..15 (0 is __syncthreads).
-  if (start < 1 || start > 15) {
-    LOG(FATAL) << "tl.named_barrier_start must be in [1, 15], got " << start;
+  if (start < 2 || start > 15) {
+    LOG(FATAL) << "tl.named_barrier_start must be in [2, 15], got " << start;
   }
   return start;
 }

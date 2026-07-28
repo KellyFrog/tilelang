@@ -287,25 +287,22 @@ inline AllReduceBarrier ResolveAllReduceBarrier(const Fragment &red_layout,
 
 // Claim a named-barrier (bar.sync) ID from the per-kernel allocator. A single
 // reduction needs only one barrier ID (reused across butterfly phases as
-// generations), so the allocator advances by 1. Falls back to the legacy fixed
-// ID 1 when no allocator is provided (targets/lowerings that do not thread one
-// through LowerArgs).
+// generations), so the allocator advances by 1. The returned ID cycles through
+// [1, named_barrier_cycle] (default 2, i.e. barrier IDs 1 and 2), reserving
+// named_barrier_cycle + 1 .. kMaxNamedBarrier for auto-allocated non-reduce
+// barriers (ThreadSync). Reusing IDs is safe for sequential reductions (each
+// barrier ID is generation-counted by the hardware); concurrent reductions on
+// different thread groups must not exceed named_barrier_cycle simultaneously
+// live distinct barriers. Falls back to the legacy fixed ID 1 when no allocator
+// is provided.
 inline int ClaimNamedBarrier(const LowerArgs &lower_args) {
   if (lower_args.named_barrier_next_id == nullptr) {
     return 1;
   }
   int id = *lower_args.named_barrier_next_id;
-  if (id > kMaxNamedBarrier) {
-    LOG(FATAL) << "tl.reduce: named-barrier ID exhaustion: this kernel needs "
-                  "more than "
-               << kMaxNamedBarrier - 1 << " cross-warp named barriers (IDs 1.."
-               << kMaxNamedBarrier
-               << "; ID 0 is reserved for __syncthreads). Combine reductions "
-                  "into a batch reduction or reduce the number of "
-                  "reductions/ThreadSync barrier groups.";
-  }
   *lower_args.named_barrier_next_id = id + 1;
-  return id;
+  int cycle = std::max(1, lower_args.named_barrier_cycle);
+  return ((id - 1) % cycle) + 1;
 }
 
 inline int64_t SignedMin(int bits) {

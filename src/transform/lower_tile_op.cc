@@ -208,7 +208,12 @@ public:
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
     ICHECK(target.defined()) << "LowerTileOpPass: Require the target attribute";
     substituter.target_ = target.value();
-    substituter.named_barrier_next_id_ = tl_config::NamedBarrierStart();
+    // Reductions claim barrier IDs cycling through [1, named_barrier_cycle],
+    // where named_barrier_cycle = tl.named_barrier_start - 1; auto-allocated
+    // non-reduce barriers (ThreadSync) start at tl.named_barrier_start.
+    int barrier_start = tl_config::NamedBarrierStart();
+    substituter.named_barrier_next_id_ = 1;
+    substituter.named_barrier_cycle_ = barrier_start - 1;
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = substituter.VisitStmt(f->body);
     fptr->body =
@@ -219,10 +224,11 @@ public:
     // later phases (OptimizeForTarget) can choose the right pass pipeline
     // without relying on pass-context side-channel mutation.
     f = WithAttr(std::move(f), kHasTMA, Bool(substituter.has_tma_));
-    // Hand the next free named-barrier ID to ThreadSync so its auto-allocated
-    // shared-memory sync barriers start past the reduction barriers.
+    // Hand the auto-allocated (non-reduce) named-barrier start to ThreadSync so
+    // its shared-memory sync barriers start at tl.named_barrier_start, past the
+    // reduction barriers which cycle through [1, start - 1].
     f = WithAttr(std::move(f), kNextNamedBarrier,
-                 IntImm(DataType::Int(32), substituter.named_barrier_next_id_));
+                 IntImm(DataType::Int(32), barrier_start));
     // Propagate per-buffer shared-memory alignment requirements collected
     // during lowering (swizzle-dependent TMA/MMA constraints) so that
     // MergeSharedMemoryAllocations can honor them when laying out the merged
@@ -1198,6 +1204,7 @@ private:
     lower_args.update_barrier_arrive = barrier_arrive_callback;
     lower_args.require_smem_alignment = require_smem_alignment_callback;
     lower_args.named_barrier_next_id = &named_barrier_next_id_;
+    lower_args.named_barrier_cycle = named_barrier_cycle_;
 
     auto lowered = tile_op->Lower(lower_args, analyzer_);
 
@@ -1550,11 +1557,15 @@ private:
   // alloc_mbarrier callback. Used to inject a barrier buffer with
   // barrier_init annotation into the root block after all tile ops are lowered.
   int mbarrier_count_{0};
-  // Next free named-barrier (bar.sync) ID. Barrier ID 0 is reserved for
-  // __syncthreads. Initialized from `tl.named_barrier_start` (default 1, so
-  // the first AllReduce keeps the legacy barrier ID 1); every AllReduce
-  // emitting a NamedBarrier claims one ID and advances this by 1.
+  // Next reduction named-barrier (bar.sync) ID. Barrier ID 0 is reserved for
+  // __syncthreads. Starts at 1; every AllReduce emitting a NamedBarrier claims
+  // one ID and advances this by 1, and the returned ID cycles through
+  // [1, named_barrier_cycle_].
   int named_barrier_next_id_{1};
+  // Reductions claim barrier IDs cycling through [1, named_barrier_cycle_]
+  // (default 2 = tl.named_barrier_start - 1), leaving IDs above that for
+  // auto-allocated non-reduce barriers (ThreadSync).
+  int named_barrier_cycle_{2};
   std::vector<int> mbarrier_arrive_counts_;
   // The shared.barrier scope buffer created lazily by alloc_mbarrier callback.
   Optional<Buffer> mbarrier_buffer_;
