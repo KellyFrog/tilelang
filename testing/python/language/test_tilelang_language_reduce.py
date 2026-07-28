@@ -210,6 +210,57 @@ def _make_disjoint_group_reduce_kernel() -> Any:
     return make_kernel()
 
 
+def _make_offset_thread_reduce_kernel() -> Any:
+    """Reduction whose participating threads occupy a non-zero thread range,
+    i.e. tx in [32, 96) of a 128-thread block."""
+
+    @tilelang.jit(
+        out_idx=1,
+        target="cuda",
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
+            tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+        },
+    )
+    def make_kernel():
+        thread_offset = 32
+        fragment_threads = 64
+
+        @T.prim_func
+        def offset_thread_reduce(
+            x: T.Tensor((1, 512), "float32"),
+            out: T.Tensor((1,), "float32"),
+        ) -> None:
+            with T.Kernel(1, threads=128):
+                x_frag = T.alloc_fragment((1, 512), "float32")
+                sum_frag = T.alloc_fragment((1,), "float32")
+                T.annotate_layout(
+                    {
+                        x_frag: T.Fragment(
+                            x_frag.shape,
+                            forward_fn=lambda i, j: (
+                                thread_offset + j // 8,
+                                j % 8,
+                            ),
+                        ),
+                        sum_frag: T.Fragment(
+                            sum_frag.shape,
+                            forward_fn=lambda i, rep: (thread_offset + rep, 0),
+                            replicate=fragment_threads,
+                        ),
+                    }
+                )
+                for i, j in T.Parallel(1, 512):
+                    x_frag[i, j] = x[i, j]
+                T.reduce_sum(x_frag, sum_frag, dim=1)
+                for i in T.Parallel(1):
+                    out[i] = sum_frag[i]
+
+        return offset_thread_reduce
+
+    return make_kernel()
+
+
 def _make_partial_warp_reduce_kernel() -> Any:
     @tilelang.jit(
         out_idx=1,
@@ -271,6 +322,15 @@ def test_reduce_partial_thread_barrier_full_block_groups():
     torch.manual_seed(1)
     x = torch.rand((2, 512), dtype=torch.float32, device="cuda")
     out = _make_two_group_reduce_kernel()(x)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out, x.sum(dim=1), rtol=1e-5, atol=1e-5)
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_reduce_partial_thread_barrier_offset_thread_range():
+    torch.manual_seed(3)
+    x = torch.rand((1, 512), dtype=torch.float32, device="cuda")
+    out = _make_offset_thread_reduce_kernel()(x)
     torch.cuda.synchronize()
     torch.testing.assert_close(out, x.sum(dim=1), rtol=1e-5, atol=1e-5)
 
