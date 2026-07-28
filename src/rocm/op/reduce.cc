@@ -24,8 +24,8 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
   static std::string MakeBatchAllReduce(std::string reducer,
                                         int reducing_threads, int scale,
                                         PrimExpr thread_offset, PrimExpr,
-                                        int batch, int workspace_stride,
-                                        Target) {
+                                        int batch, int workspace_stride, Target,
+                                        int /*barrier_id*/) {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset << ", " << batch << ", "
@@ -36,7 +36,8 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
   static std::string MakeScalarAllReduce(std::string reducer,
                                          int reducing_threads, int scale,
                                          PrimExpr thread_offset, PrimExpr,
-                                         Target, int /*barrier_participants*/) {
+                                         Target, int /*barrier_participants*/,
+                                         int /*barrier_id*/) {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset << ">::run";

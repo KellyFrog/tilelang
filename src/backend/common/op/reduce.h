@@ -163,9 +163,14 @@ ResolveScalarAllReduceBarrier(const Fragment &red_layout,
                   "compile-time constant.";
   }
 
-  // Enumerate every output-index x replicate combination to compute the exact
-  // participant set. ReplicateExtent is only the per-output replication; a
-  // multi-output layout can span more threads.
+  // Enumerate the full thread image (every output-index x replicate
+  // combination) to compute the exact participant set and verify it is one
+  // contiguous range. The participant count is the image span, not
+  // ReplicateExtent: that is only the per-output-element replication, and a
+  // multi-output reduce layout spans replicate * num_outputs threads (e.g.
+  // two adjacent 64-thread groups). This also verifies density for the
+  // whole-CTA case before we decide between the whole-CTA and partial
+  // barriers.
   std::vector<std::pair<Var, int64_t>> enum_vars;
   for (size_t i = 0; i < red_layout->InputShape().size(); ++i) {
     const int64_t *extent = as_const_int(red_layout->InputShape()[i]);
@@ -243,6 +248,8 @@ ResolveScalarAllReduceBarrier(const Fragment &red_layout,
          "thread image";
 
   if (image_min == *block_min && image_count == *block_extent) {
+    // Whole-CTA participation: PartitionLoop drops the guard, so the
+    // whole-CTA barrier the backend emits by default is correct.
     return barrier;
   }
 

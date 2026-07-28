@@ -424,10 +424,11 @@ class CumMax2D:
 
 class NamedBarrier:
     """Named barrier policy for AllReduce, uses bar.sync instead of __syncthreads.
-    Based on tl::NamedBarrier<all_threads> from reduce.h"""
+    Based on tl::NamedBarrier<all_threads, barrier_id> from reduce.h"""
 
-    def __init__(self, all_threads):
+    def __init__(self, all_threads, barrier_id=1):
         self.all_threads = all_threads
+        self.barrier_id = barrier_id
 
 
 def AllReduce(reducer, threads, scale, thread_offset, all_threads=None, batch_size=1, workspace_stride=0):
@@ -448,12 +449,14 @@ def AllReduce(reducer, threads, scale, thread_offset, all_threads=None, batch_si
         A callable object with run() and run_hopper() methods
     """
 
-    # Detect NamedBarrier: extract all_threads and use bar.sync path
+    # Detect NamedBarrier: extract all_threads/barrier_id and use bar.sync path
     use_named_barrier = isinstance(all_threads, NamedBarrier)
     if use_named_barrier:
         barrier_threads = all_threads.all_threads
+        barrier_id = all_threads.barrier_id
     else:
         barrier_threads = all_threads
+        barrier_id = 1
 
     class AllReduceInstance:
         def __init__(
@@ -466,6 +469,7 @@ def AllReduce(reducer, threads, scale, thread_offset, all_threads=None, batch_si
             use_named_barrier: cutlass.Constexpr[bool],
             batch_size: cutlass.Constexpr[int],
             workspace_stride: cutlass.Constexpr[int],
+            barrier_id: cutlass.Constexpr[int] = 1,
         ):
             self.reducer = reducer
             self.threads = threads
@@ -475,6 +479,7 @@ def AllReduce(reducer, threads, scale, thread_offset, all_threads=None, batch_si
             self.use_named_barrier = use_named_barrier
             self.batch_size = batch_size
             self.workspace_stride = workspace_stride
+            self.barrier_id = barrier_id
 
         def run(self, x, red_buf: cute.Pointer = None):
             """
@@ -531,12 +536,12 @@ def AllReduce(reducer, threads, scale, thread_offset, all_threads=None, batch_si
             offset = self.threads // 2
             tidx, _, _ = cute.arch.thread_idx()
             if offset >= 32:
-                bar_sync_ptx(1, self.all_threads)
+                bar_sync_ptx(self.barrier_id, self.all_threads)
                 if self.batch_size > 1:
                     x_tensor = cute.make_tensor(x, (self.batch_size,))
                     for i in range(self.batch_size):
                         cute.make_tensor(red_buf + (tidx - self.thread_offset) + i * self.workspace_stride, (1,))[0] = x_tensor[i]
-                    bar_sync_ptx(2, self.all_threads)
+                    bar_sync_ptx(self.barrier_id, self.all_threads)
                     for i in range(self.batch_size):
                         x_tensor[i] = self.reducer()(
                             x_tensor[i],
@@ -544,7 +549,7 @@ def AllReduce(reducer, threads, scale, thread_offset, all_threads=None, batch_si
                         )
                 else:
                     cute.make_tensor(red_buf + tidx - self.thread_offset, (1,))[0] = x
-                    bar_sync_ptx(2, self.all_threads)
+                    bar_sync_ptx(self.barrier_id, self.all_threads)
                     x = self.reducer()(x, cute.make_tensor(red_buf + ((tidx - self.thread_offset) ^ offset), (1,))[0])
             else:
                 if self.batch_size > 1:
@@ -559,8 +564,13 @@ def AllReduce(reducer, threads, scale, thread_offset, all_threads=None, batch_si
             if offset == self.scale:
                 return x
             else:
+                barrier = (
+                    NamedBarrier(self.all_threads, self.barrier_id)
+                    if self.use_named_barrier
+                    else self.all_threads
+                )
                 return AllReduce(
-                    self.reducer, offset, self.scale, self.thread_offset, self.all_threads, self.batch_size, self.workspace_stride
+                    self.reducer, offset, self.scale, self.thread_offset, barrier, self.batch_size, self.workspace_stride
                 ).run_hopper(x, red_buf)
 
-    return AllReduceInstance(reducer, threads, scale, thread_offset, barrier_threads, use_named_barrier, batch_size, workspace_stride)
+    return AllReduceInstance(reducer, threads, scale, thread_offset, barrier_threads, use_named_barrier, batch_size, workspace_stride, barrier_id)
