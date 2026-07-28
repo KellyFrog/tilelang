@@ -45,13 +45,6 @@ using namespace ffi;
 
 namespace reduce {
 
-// AllReduce named barriers use PTX bar.sync id, count. This form is available
-// on Ampere; keep the lowering and codegen decisions behind one capability
-// check so they cannot select different barrier policies.
-inline bool TargetSupportsAllReduceNamedBarrier(const Target &target) {
-  return TargetHasSMVersionGE(target, 80);
-}
-
 inline Array<PrimExpr> InputPlaceholders(size_t n) {
   Array<PrimExpr> result;
   result.reserve(n);
@@ -998,7 +991,7 @@ template <typename Impl> struct ReduceLowerer {
                   .value();
           reduce::AllReduceBarrier barrier;
           if (reducing_threads > 32 &&
-              reduce::TargetSupportsAllReduceNamedBarrier(lower_args.target)) {
+              TargetSupportsNamedBarrier(lower_args.target)) {
             barrier.barrier_id = reduce::ClaimNamedBarrier(lower_args);
           }
           std::string allreduce = Impl::MakeBatchAllReduce(
@@ -1185,7 +1178,7 @@ template <typename Impl> struct ReduceLowerer {
         auto thread_offset = lower_args.thread_bounds->min;
         reduce::AllReduceBarrier barrier;
         if (reducing_threads > 32 &&
-            reduce::TargetSupportsAllReduceNamedBarrier(lower_args.target)) {
+            TargetSupportsNamedBarrier(lower_args.target)) {
           barrier = reduce::ResolveAllReduceBarrier(
               red_layout, lower_args.thread_bounds, lower_args.target);
           barrier.barrier_id = reduce::ClaimNamedBarrier(lower_args);

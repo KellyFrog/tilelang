@@ -19,8 +19,7 @@ struct ThreadBoundKey {
   }
 };
 
-// There are 16 Named Barriers provided by Hardware starting in Hopper
-// Their IDs are in the range 0-15
+// PTX named barriers provide 16 IDs in the range 0-15.
 // Number of threads syncing using the barrier must be a multiple of warp-size
 // ID 0 should not be used for safety, as other driver APIs (i.e. __syncthreads)
 // may use it and conflict with other uses.

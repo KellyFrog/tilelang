@@ -37,7 +37,7 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
-    if (backend::reduce::TargetSupportsAllReduceNamedBarrier(target)) {
+    if (TargetSupportsNamedBarrier(target)) {
       ss << ", tl::NamedBarrier<" << all_threads << ", " << barrier.barrier_id
          << ">, " << batch << ", " << workspace_stride;
     } else {
@@ -58,7 +58,7 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
     if (barrier.participants > 0) {
       ss << ", tl::NamedBarrier<" << barrier.participants << ", "
          << barrier.barrier_id << ">";
-    } else if (backend::reduce::TargetSupportsAllReduceNamedBarrier(target)) {
+    } else if (TargetSupportsNamedBarrier(target)) {
       ss << ", tl::NamedBarrier<" << all_threads << ", " << barrier.barrier_id
          << ">";
     }

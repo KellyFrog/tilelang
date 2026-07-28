@@ -58,7 +58,7 @@ template <typename Impl> struct FinalizeReducerLowerer {
     // Only reductions that need a cross-warp named barrier consume a barrier
     // ID; a sub-warp reduction uses shuffle and never issues bar.sync.
     reduce::AllReduceBarrier barrier;
-    if (reduce::TargetSupportsAllReduceNamedBarrier(lower_args.target) &&
+    if (TargetSupportsNamedBarrier(lower_args.target) &&
         reducing_threads > Impl::WarpSize(lower_args.target)) {
       barrier.barrier_id = reduce::ClaimNamedBarrier(lower_args);
     }
