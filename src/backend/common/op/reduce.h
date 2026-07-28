@@ -99,8 +99,9 @@ struct AllReduceBarrier {
   /*! \brief Named-barrier arrival count; 0 means the whole-CTA barrier. */
   int64_t participants{0};
   /*!
-   * \brief Per-reduction named-barrier (bar.sync) ID, rotated so multiple
-   * reductions in one kernel never collide.
+   * \brief Named-barrier (bar.sync) ID assigned from the reduction ID cycle.
+   * Concurrent reductions are safe when their simultaneously live count does
+   * not exceed the configured cycle size.
    */
   int barrier_id{1};
 };

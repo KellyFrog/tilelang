@@ -231,9 +231,10 @@ template <int all_threads, int id = 1> struct NamedBarrier {
 //   Barrier         - barrier policy type. For named barriers this is
 //                     NamedBarrier<all_threads, barrier_id>, so the barrier ID
 //                     is a property of the barrier type itself. The codegen
-//                     rotates the ID per reduction so multiple reductions in a
-//                     kernel never collide; SyncThreadsBarrier (default) is
-//                     used on pre-Hopper targets.
+//                     cycles IDs across reductions. Concurrent reductions must
+//                     fit in the configured reduction ID cycle;
+//                     SyncThreadsBarrier (default) is used on pre-Hopper
+//                     targets.
 //   batch_size      - number of independent values to reduce in parallel,
 //                     sharing synchronization barriers across all values.
 //                     Default 1 preserves the original scalar behaviour.

@@ -104,9 +104,10 @@ static constexpr const char *kDisableSafeMemoryLegalize =
 static constexpr const char *kDisableWarpSpecialized =
     "tl.disable_warp_specialized";
 static constexpr const char *kConfigIndexBitwidth = "tl.config_index_bitwidth";
-// Pass config: first named-barrier (bar.sync) ID handed to reductions. Default
-// 1 keeps the first AllReduce on barrier ID 1; must be in [1, 15] (0 is
-// __syncthreads, hardware provides IDs 0..15).
+// Pass config: first auto-allocated non-reduce named-barrier (bar.sync) ID.
+// Reductions cycle through IDs [1, start - 1], while ThreadSync starts at this
+// ID. Defaults to 3 and must be in [2, 15]; ID 0 is reserved for
+// __syncthreads, and hardware provides IDs 0..15.
 static constexpr const char *kNamedBarrierStart = "tl.named_barrier_start";
 // Deprecated pass config, temporarily re-enabled. Prevents plain T.copy()
 // from auto-lowering to TMA store. Will be removed in v0.1.10.

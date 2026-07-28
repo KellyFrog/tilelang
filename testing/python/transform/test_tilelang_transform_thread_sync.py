@@ -818,5 +818,34 @@ def test_partial_sync_warp_multiple_still_lowered():
     assert re.search(r'tvm_storage_sync\("shared",\s*\d+,\s*32\)', s), f"Expected a partial barrier with thread_count=32:\n{s}"
 
 
+@tilelang.testing.requires_cuda
+def test_partial_sync_honors_named_barrier_start_attr():
+    """ThreadSync must use the configured first non-reduce barrier ID even
+    when it is below the legacy fixed start of 3."""
+    import re
+
+    @T.prim_func(private=True)
+    def func():
+        S = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        acc = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx < 32:
+            acc[0] = T.float32(0)
+            for i in range(2):
+                S[tx] = T.float32(1)
+                acc[0] += S[31 - tx]
+
+    func = func.with_attr("tl.next_named_barrier", 2)
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    s = str(mod.script())
+    assert re.search(r'tvm_storage_sync\("shared",\s*2,\s*32\)', s), (
+        f"Expected partial barrier ID 2:\n{s}"
+    )
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

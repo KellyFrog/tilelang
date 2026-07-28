@@ -192,7 +192,12 @@ class PassConfigKey(str, Enum):
     reduction, reused across butterfly phases as barrier generations); the
     default 3 keeps barrier IDs 1 and 2 for reductions. Auto-allocated
     non-reduce barriers (ThreadSync shared-memory syncs) start at this value.
-    Must be in [2, 15]; ID 0 is reserved for __syncthreads."""
+    Must be in [2, 15]; ID 0 is reserved for __syncthreads.
+
+    The default safely supports at most two cross-warp reductions whose
+    lifetimes can overlap. If a kernel can have C such reductions live
+    concurrently, set this to at least C + 1. Sequential reductions may safely
+    reuse IDs. Increasing this value leaves fewer IDs for ThreadSync barriers."""
 
     TL_FORCE_LET_INLINE = "tl.force_let_inline"
     """Force TileLang to inline let bindings during simplification. Default: False"""
