@@ -32,13 +32,14 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
   static std::string
   MakeBatchAllReduce(std::string reducer, int reducing_threads, int scale,
                      PrimExpr thread_offset, PrimExpr all_threads, int batch,
-                     int workspace_stride, Target target, int barrier_id) {
+                     int workspace_stride, Target target,
+                     const backend::reduce::AllReduceBarrier &barrier) {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
     if (TargetHasSMVersionGE(target, 90)) {
-      ss << ", tl::NamedBarrier<" << all_threads << ", " << barrier_id << ">, "
-         << batch << ", " << workspace_stride;
+      ss << ", tl::NamedBarrier<" << all_threads << ", " << barrier.barrier_id
+         << ">, " << batch << ", " << workspace_stride;
     } else {
       ss << ", tl::SyncThreadsBarrier, " << batch << ", " << workspace_stride;
     }
@@ -49,19 +50,21 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
   static std::string
   MakeScalarAllReduce(std::string reducer, int reducing_threads, int scale,
                       PrimExpr thread_offset, PrimExpr all_threads,
-                      Target target, int barrier_participants, int barrier_id) {
+                      Target target,
+                      const backend::reduce::AllReduceBarrier &barrier) {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
-    if (barrier_participants > 0) {
-      // Partial-CTA reduction: exactly `barrier_participants` threads, a
+    if (barrier.participants > 0) {
+      // Partial-CTA reduction: exactly `barrier.participants` threads, a
       // contiguous range starting at `thread_offset`, arrive at the
       // barrier. `thread_offset` doubles as the shared-memory base so the
       // butterfly exchange stays inside the participating range.
-      ss << ", tl::NamedBarrier<" << barrier_participants << ", " << barrier_id
-         << ">";
+      ss << ", tl::NamedBarrier<" << barrier.participants << ", "
+         << barrier.barrier_id << ">";
     } else if (TargetHasSMVersionGE(target, 90)) {
-      ss << ", tl::NamedBarrier<" << all_threads << ", " << barrier_id << ">";
+      ss << ", tl::NamedBarrier<" << all_threads << ", " << barrier.barrier_id
+         << ">";
     }
     ss << ">::run";
     return ss.str();

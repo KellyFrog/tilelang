@@ -82,18 +82,26 @@ inline Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
 }
 
 /*!
- * \brief Barrier participation for a lowered scalar AllReduce call.
+ * \brief Barrier info for a lowered AllReduce call, passed to the backend
+ * codegen. Only backends that emit named barriers (CUDA on SM90+) consume
+ * `participants` and `barrier_id`; backends that use __syncthreads (ROCm,
+ * pre-SM90 CUDA) ignore the whole object.
  */
-struct ScalarAllReduceBarrier {
+struct AllReduceBarrier {
   /*!
-   * \brief Whether only part of the CTA reaches the barrier. False keeps
-   * the legacy whole-CTA codegen untouched.
+   * \brief Whether only part of the CTA reaches the barrier. False keeps the
+   * whole-CTA codegen (all threads arrive).
    */
   bool partial{false};
   /*! \brief Base thread index of the contiguous participating range. */
   int64_t base{0};
-  /*! \brief Number of participating threads (named-barrier arrival count). */
+  /*! \brief Named-barrier arrival count; 0 means the whole-CTA barrier. */
   int64_t participants{0};
+  /*!
+   * \brief Per-reduction named-barrier (bar.sync) ID, rotated so multiple
+   * reductions in one kernel never collide.
+   */
+  int barrier_id{1};
 };
 
 /*!
@@ -116,11 +124,10 @@ struct ScalarAllReduceBarrier {
  * \param thread_bounds The lowered CTA thread range.
  * \param target Lowering target (warp size is read from its attributes).
  */
-inline ScalarAllReduceBarrier
-ResolveScalarAllReduceBarrier(const Fragment &red_layout,
-                              const Range &thread_bounds,
-                              const Target &target) {
-  ScalarAllReduceBarrier barrier;
+inline AllReduceBarrier ResolveAllReduceBarrier(const Fragment &red_layout,
+                                                const Range &thread_bounds,
+                                                const Target &target) {
+  AllReduceBarrier barrier;
   const int64_t *block_min = as_const_int(thread_bounds->min);
   const int64_t *block_extent = as_const_int(thread_bounds->extent);
   const int64_t *replicate = as_const_int(red_layout->ReplicateExtent());
@@ -1159,15 +1166,15 @@ template <typename Impl> struct ReduceLowerer {
           std::string reducer =
               reduce::MakeCodegenReducer(op, can_batch_pack ? vsize : 1)
                   .value();
-          int barrier_id = 1;
+          reduce::AllReduceBarrier barrier;
           if (reducing_threads > 32 &&
               TargetHasSMVersionGE(lower_args.target, 90)) {
-            barrier_id = reduce::ClaimNamedBarrier(lower_args);
+            barrier.barrier_id = reduce::ClaimNamedBarrier(lower_args);
           }
           std::string allreduce = Impl::MakeBatchAllReduce(
               reducer, reducing_threads, thread_step.scale, thread_offset,
               lower_args.thread_bounds->extent, eff_batch, block_threads,
-              lower_args.target, barrier_id);
+              lower_args.target, barrier);
 
           DataType ws_dtype = can_batch_pack
                                   ? clear_buffer->dtype.with_lanes(vsize)
@@ -1350,13 +1357,12 @@ template <typename Impl> struct ReduceLowerer {
         // participating thread range from the reduce layout (the very same
         // layout PartitionLoop later derives the runtime guard from) and
         // restrict the named barrier to it.
-        reduce::ScalarAllReduceBarrier barrier;
-        int barrier_id = 1;
+        reduce::AllReduceBarrier barrier;
         if (reducing_threads > 32 &&
             TargetHasSMVersionGE(lower_args.target, 90)) {
-          barrier = reduce::ResolveScalarAllReduceBarrier(
+          barrier = reduce::ResolveAllReduceBarrier(
               red_layout, lower_args.thread_bounds, lower_args.target);
-          barrier_id = reduce::ClaimNamedBarrier(lower_args);
+          barrier.barrier_id = reduce::ClaimNamedBarrier(lower_args);
           if (barrier.partial) {
             thread_offset = Integer(barrier.base);
           }
@@ -1364,8 +1370,7 @@ template <typename Impl> struct ReduceLowerer {
         std::string allreduce = Impl::MakeScalarAllReduce(
             reduce::MakeCodegenReducer(op).value(), reducing_threads,
             thread_step.scale, thread_offset, lower_args.thread_bounds->extent,
-            lower_args.target, static_cast<int>(barrier.participants),
-            barrier_id);
+            lower_args.target, barrier);
         Array<PrimExpr> thread_reduce_args = {
             StringImm(allreduce), BufferLoad(clear_buffer, red_indices)};
         if (reducing_threads > 32) {

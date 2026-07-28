@@ -21,11 +21,11 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
 
   static int GetPreferedVectorizedSize(DataType, Target) { return 1; }
 
-  static std::string MakeBatchAllReduce(std::string reducer,
-                                        int reducing_threads, int scale,
-                                        PrimExpr thread_offset, PrimExpr,
-                                        int batch, int workspace_stride, Target,
-                                        int /*barrier_id*/) {
+  static std::string
+  MakeBatchAllReduce(std::string reducer, int reducing_threads, int scale,
+                     PrimExpr thread_offset, PrimExpr, int batch,
+                     int workspace_stride, Target,
+                     const backend::reduce::AllReduceBarrier &) {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset << ", " << batch << ", "
@@ -33,11 +33,10 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
     return ss.str();
   }
 
-  static std::string MakeScalarAllReduce(std::string reducer,
-                                         int reducing_threads, int scale,
-                                         PrimExpr thread_offset, PrimExpr,
-                                         Target, int /*barrier_participants*/,
-                                         int /*barrier_id*/) {
+  static std::string
+  MakeScalarAllReduce(std::string reducer, int reducing_threads, int scale,
+                      PrimExpr thread_offset, PrimExpr, Target,
+                      const backend::reduce::AllReduceBarrier &) {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset << ">::run";

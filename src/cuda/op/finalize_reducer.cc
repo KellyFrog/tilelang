@@ -22,13 +22,14 @@ struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
   static std::string
   MakeBatchAllReduce(std::string reducer, int reducing_threads, int scale,
                      PrimExpr thread_offset, PrimExpr all_threads, int batch,
-                     int workspace_stride, Target target, int barrier_id) {
+                     int workspace_stride, Target target,
+                     const backend::reduce::AllReduceBarrier &barrier) {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
     if (TargetHasSMVersionGE(target, 90)) {
-      ss << ", tl::NamedBarrier<" << all_threads << ", " << barrier_id << ">, "
-         << batch << ", " << workspace_stride;
+      ss << ", tl::NamedBarrier<" << all_threads << ", " << barrier.barrier_id
+         << ">, " << batch << ", " << workspace_stride;
     } else {
       ss << ", tl::SyncThreadsBarrier, " << batch << ", " << workspace_stride;
     }
@@ -36,16 +37,17 @@ struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
     return ss.str();
   }
 
-  static std::string MakeScalarAllReduce(std::string reducer,
-                                         int reducing_threads, int scale,
-                                         PrimExpr thread_offset,
-                                         PrimExpr all_threads, Target target,
-                                         int barrier_id) {
+  static std::string
+  MakeScalarAllReduce(std::string reducer, int reducing_threads, int scale,
+                      PrimExpr thread_offset, PrimExpr all_threads,
+                      Target target,
+                      const backend::reduce::AllReduceBarrier &barrier) {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
     if (TargetHasSMVersionGE(target, 90)) {
-      ss << ", tl::NamedBarrier<" << all_threads << ", " << barrier_id << ">";
+      ss << ", tl::NamedBarrier<" << all_threads << ", " << barrier.barrier_id
+         << ">";
     }
     ss << ">::run";
     return ss.str();
