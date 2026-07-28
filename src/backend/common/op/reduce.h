@@ -18,11 +18,14 @@
 #include "tir/transforms/ir_utils.h"
 #include "transform/loop_partition.h"
 
+#include <tvm/arith/analyzer.h>
 #include <tvm/arith/iter_affine_map.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/op_attr_types.h>
 #include <tvm/tirx/stmt_functor.h>
+
+#include "backend/common/target_utils.h"
 
 #include <algorithm>
 #include <cmath>
@@ -31,6 +34,7 @@
 #include <optional>
 #include <string>
 #include <tuple>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -73,6 +77,116 @@ inline Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
   return Fragment(reducer_shape, {}, thd, reducer_rep_extent, std::nullopt)
       ->CondenseReplicateVar()
       ->BindThreadRange(src_layout->ThreadRange());
+}
+
+/*!
+ * \brief Barrier participation for a lowered scalar AllReduce call.
+ */
+struct ScalarAllReduceBarrier {
+  /*!
+   * \brief Whether only part of the CTA reaches the barrier. False keeps
+   * the legacy whole-CTA codegen untouched.
+   */
+  bool partial{false};
+  /*! \brief Base thread index of the contiguous participating range. */
+  int64_t base{0};
+  /*! \brief Number of participating threads (named-barrier arrival count). */
+  int64_t participants{0};
+};
+
+/*!
+ * \brief Resolve the thread set that actually reaches a lowered scalar
+ * AllReduce call.
+ *
+ * After lowering, PartitionLoop guards the reduce body with exactly this
+ * reduce layout (see ReduceLowerer::Lower), so the participant set is a
+ * compile-time property of the layout's thread image rather than something
+ * that needs a runtime/TIR-level analysis:
+ *   - if the image covers the whole CTA, the guard is dropped and every
+ *     thread arrives; the legacy whole-CTA barrier stays correct;
+ *   - otherwise only the threads in the image execute the call, and the
+ *     named-barrier arrival count must be restricted to it. The image is
+ *     required to be one contiguous, warp-aligned range [base, base +
+ *     participants); anything else is rejected at lowering time instead of
+ *     emitting a barrier that only part of the CTA arrives at.
+ *
+ * \param red_layout The reduce layout the partition guard is derived from.
+ * \param thread_bounds The lowered CTA thread range.
+ * \param target Lowering target (warp size is read from its attributes).
+ */
+inline ScalarAllReduceBarrier
+ResolveScalarAllReduceBarrier(const Fragment &red_layout,
+                              const Range &thread_bounds, const Target &target) {
+  ScalarAllReduceBarrier barrier;
+  const int64_t *block_min = as_const_int(thread_bounds->min);
+  const int64_t *block_extent = as_const_int(thread_bounds->extent);
+  const int64_t *replicate = as_const_int(red_layout->ReplicateExtent());
+  if (block_min == nullptr || block_extent == nullptr ||
+      replicate == nullptr || *replicate <= 0) {
+    // Dynamic thread counts: leave the codegen untouched.
+    return barrier;
+  }
+
+  arith::Analyzer analyzer;
+  PrimExpr thread_expr = red_layout->GetForwardThread();
+  // Bind every variable the thread expression depends on: layout input
+  // placeholders get their input-shape ranges, and the replicate variable
+  // (the only other variable a reduce layout's thread expression contains)
+  // gets [0, ReplicateExtent).
+  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> placeholders;
+  for (size_t i = 0; i < red_layout->InputShape().size(); ++i) {
+    Var placeholder = InputPlaceholder(i);
+    placeholders.insert(placeholder);
+    analyzer.Bind(placeholder,
+                  Range::FromMinExtent(Integer(0), red_layout->InputShape()[i]));
+  }
+  PostOrderVisit(thread_expr, [&](const ObjectRef &node) {
+    const auto *var = node.as<VarNode>();
+    if (var == nullptr) {
+      return;
+    }
+    Var ref = GetRef<Var>(var);
+    if (!placeholders.count(ref)) {
+      analyzer.Bind(ref, Range::FromMinExtent(Integer(0), Integer(*replicate)));
+    }
+  });
+  auto bound = analyzer.const_int_bound(thread_expr);
+  if (bound->min_value == arith::ConstIntBoundNode::kNegInf ||
+      bound->max_value == arith::ConstIntBoundNode::kPosInf) {
+    // The participant set is not a compile-time constant.
+    return barrier;
+  }
+
+  const int64_t span = bound->max_value - bound->min_value + 1;
+  if (bound->min_value == *block_min && span == *block_extent) {
+    // Whole-CTA participation: PartitionLoop drops the guard, so the
+    // whole-CTA barrier the backend emits by default is correct.
+    return barrier;
+  }
+
+  // Partial CTA: only the layout's thread image executes the call. Since
+  // the image contains at most `replicate` threads and lies inside a span
+  // of `span` values, span == replicate proves the image is exactly
+  // [min_value, min_value + span): one contiguous range.
+  ICHECK_EQ(span, *replicate)
+      << "tl.reduce: partial scalar AllReduce barrier requires one "
+         "contiguous thread range, but the reduce layout's thread image "
+         "spans ["
+      << bound->min_value << ", " << bound->max_value << "] ("
+      << span << " values for " << *replicate << " participating threads)";
+  int64_t warp_size = 32;
+  if (auto warp_size_attr = target->GetAttr<Integer>("thread_warp_size")) {
+    warp_size = warp_size_attr.value()->value;
+  }
+  ICHECK_EQ(span % warp_size, 0)
+      << "tl.reduce: partial scalar AllReduce barrier requires a "
+         "warp-aligned thread range, got "
+      << span << " threads";
+
+  barrier.partial = true;
+  barrier.base = bound->min_value;
+  barrier.participants = span;
+  return barrier;
 }
 
 inline int64_t SignedMin(int bits) {
@@ -1125,10 +1239,35 @@ template <typename Impl> struct ReduceLowerer {
         reduce::CheckAllReduceWidth(reducing_threads, thread_step.scale,
                                     "tl.reduce");
         auto thread_offset = lower_args.thread_bounds->min;
+        // When only part of the CTA reaches the barrier, resolve the exact
+        // participating thread range from the reduce layout (the very same
+        // layout PartitionLoop later derives the runtime guard from) and
+        // restrict the named barrier to it.
+        reduce::ScalarAllReduceBarrier barrier;
+        if (reducing_threads > 32 &&
+            TargetHasSMVersionGE(lower_args.target, 90)) {
+          barrier = reduce::ResolveScalarAllReduceBarrier(
+              red_layout, lower_args.thread_bounds, lower_args.target);
+          if (barrier.partial) {
+            if (lower_args.partial_scalar_reduce_count != nullptr &&
+                *lower_args.partial_scalar_reduce_count > 0) {
+              LOG(FATAL)
+                  << "tl.reduce: more than one partial scalar AllReduce in "
+                     "a kernel would collide on the shared named barrier IDs "
+                     "(1, 2) and workspace. Combine the reductions into a "
+                     "single batch reduction or give them disjoint barriers.";
+            }
+            if (lower_args.partial_scalar_reduce_count != nullptr) {
+              ++(*lower_args.partial_scalar_reduce_count);
+            }
+            thread_offset = Integer(barrier.base);
+          }
+        }
         std::string allreduce = Impl::MakeScalarAllReduce(
             reduce::MakeCodegenReducer(op).value(), reducing_threads,
-            thread_step.scale, thread_offset, lower_args.thread_bounds->extent,
-            lower_args.target);
+            thread_step.scale, thread_offset,
+            lower_args.thread_bounds->extent, lower_args.target,
+            static_cast<int>(barrier.participants));
         Array<PrimExpr> thread_reduce_args = {
             StringImm(allreduce), BufferLoad(clear_buffer, red_indices)};
         if (reducing_threads > 32) {

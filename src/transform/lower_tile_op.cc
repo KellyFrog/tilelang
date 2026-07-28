@@ -1191,6 +1191,7 @@ private:
     lower_args.alloc_mbarrier = mbarrier_callback;
     lower_args.update_barrier_arrive = barrier_arrive_callback;
     lower_args.require_smem_alignment = require_smem_alignment_callback;
+    lower_args.partial_scalar_reduce_count = &partial_scalar_reduce_count_;
 
     auto lowered = tile_op->Lower(lower_args, analyzer_);
 
@@ -1543,6 +1544,10 @@ private:
   // alloc_mbarrier callback. Used to inject a barrier buffer with
   // barrier_init annotation into the root block after all tile ops are lowered.
   int mbarrier_count_{0};
+  // Number of partial scalar AllReduce calls lowered so far in this kernel.
+  // Two of them would collide on named barrier IDs (1, 2) and the shared
+  // workspace, so the reduce lowering rejects the second.
+  int partial_scalar_reduce_count_{0};
   std::vector<int> mbarrier_arrive_counts_;
   // The shared.barrier scope buffer created lazily by alloc_mbarrier callback.
   Optional<Buffer> mbarrier_buffer_;

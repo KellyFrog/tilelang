@@ -225,36 +225,39 @@ def _make_offset_thread_reduce_kernel() -> Any:
     def make_kernel():
         thread_offset = 32
         fragment_threads = 64
+        rows = 2
+        width = 512
+        vector_size = 8
 
         @T.prim_func
         def offset_thread_reduce(
-            x: T.Tensor((1, 512), "float32"),
-            out: T.Tensor((1,), "float32"),
+            x: T.Tensor((rows, width), "float32"),
+            out: T.Tensor((rows, width), "float32"),
         ) -> None:
             with T.Kernel(1, threads=128):
-                x_frag = T.alloc_fragment((1, 512), "float32")
-                sum_frag = T.alloc_fragment((1,), "float32")
+                x_frag = T.alloc_fragment((rows, width), "float32")
+                sum_frag = T.alloc_fragment((rows,), "float32")
                 T.annotate_layout(
                     {
                         x_frag: T.Fragment(
                             x_frag.shape,
                             forward_fn=lambda i, j: (
-                                thread_offset + j // 8,
-                                j % 8,
+                                thread_offset + j // vector_size,
+                                i * vector_size + j % vector_size,
                             ),
                         ),
                         sum_frag: T.Fragment(
                             sum_frag.shape,
-                            forward_fn=lambda i, rep: (thread_offset + rep, 0),
+                            forward_fn=lambda i, rep: (thread_offset + rep, i),
                             replicate=fragment_threads,
                         ),
                     }
                 )
-                for i, j in T.Parallel(1, 512):
+                for i, j in T.Parallel(rows, width):
                     x_frag[i, j] = x[i, j]
                 T.reduce_sum(x_frag, sum_frag, dim=1)
-                for i in T.Parallel(1):
-                    out[i] = sum_frag[i]
+                for i, j in T.Parallel(rows, width):
+                    out[i, j] = x_frag[i, j] / sum_frag[i]
 
         return offset_thread_reduce
 
@@ -329,21 +332,33 @@ def test_reduce_partial_thread_barrier_full_block_groups():
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_reduce_partial_thread_barrier_offset_thread_range():
     torch.manual_seed(3)
-    x = torch.rand((1, 512), dtype=torch.float32, device="cuda")
+    x = torch.rand((2, 512), dtype=torch.float32, device="cuda")
     out = _make_offset_thread_reduce_kernel()(x)
     torch.cuda.synchronize()
-    torch.testing.assert_close(out, x.sum(dim=1), rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(
+        out,
+        x / x.sum(dim=1, keepdim=True),
+        rtol=1e-5,
+        atol=1e-6,
+    )
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_reduce_partial_thread_barrier_rejects_disjoint_groups():
-    with pytest.raises(Exception, match="must start at threadIdx.x = 0"):
+    """Two independent partial reductions on disjoint thread ranges.
+
+    Each reduction individually resolves to a contiguous participating range
+    ([0, 64) and [64, 128)), but two partial scalar AllReduces in one kernel
+    would reuse the same named barrier IDs and shared workspace, so the second
+    one is rejected at lowering time.
+    """
+    with pytest.raises(Exception, match="collide on the shared named barrier IDs"):
         _make_disjoint_group_reduce_kernel()
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-def test_reduce_partial_thread_barrier_rejects_partial_warp():
-    with pytest.raises(Exception, match="warp-aligned thread range"):
+def test_reduce_partial_thread_barrier_rejects_non_power_of_two_width():
+    with pytest.raises(Exception, match="positive power of two"):
         _make_partial_warp_reduce_kernel()
 
 

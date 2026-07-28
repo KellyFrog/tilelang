@@ -140,6 +140,12 @@ struct LowerArgs {
   // alignment implied by the chosen swizzle mode here; LowerTileOp collects
   // the results into the kSmemAlignmentMap PrimFunc attribute.
   RequireSmemAlignmentCallback require_smem_alignment = nullptr;
+  // Per-kernel counter of partial scalar AllReduce calls already lowered.
+  // Two such calls in one kernel would reuse the same named barrier IDs
+  // (1, 2) and shared workspace, so the reduce lowering rejects the second
+  // one. Points to a LowerTileOpPass-owned counter; nullptr when the
+  // lowering does not provide one.
+  int *partial_scalar_reduce_count = nullptr;
 };
 
 struct LayoutInferArgs {

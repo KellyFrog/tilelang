@@ -49,11 +49,18 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
   static std::string MakeScalarAllReduce(std::string reducer,
                                          int reducing_threads, int scale,
                                          PrimExpr thread_offset,
-                                         PrimExpr all_threads, Target target) {
+                                         PrimExpr all_threads, Target target,
+                                         int barrier_participants) {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
-    if (TargetHasSMVersionGE(target, 90)) {
+    if (barrier_participants > 0) {
+      // Partial-CTA reduction: exactly `barrier_participants` threads, a
+      // contiguous range starting at `thread_offset`, arrive at the
+      // barrier. `thread_offset` doubles as the shared-memory base so the
+      // butterfly exchange stays inside the participating range.
+      ss << ", tl::NamedBarrier<" << barrier_participants << ">";
+    } else if (TargetHasSMVersionGE(target, 90)) {
       ss << ", tl::NamedBarrier<" << all_threads << ">";
     }
     ss << ">::run";

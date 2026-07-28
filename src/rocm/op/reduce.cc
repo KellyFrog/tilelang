@@ -36,7 +36,7 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
   static std::string MakeScalarAllReduce(std::string reducer,
                                          int reducing_threads, int scale,
                                          PrimExpr thread_offset, PrimExpr,
-                                         Target) {
+                                         Target, int /*barrier_participants*/) {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset << ">::run";
