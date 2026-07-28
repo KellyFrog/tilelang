@@ -112,7 +112,7 @@ def _make_partial_reduce_kernel(target: str = "cuda") -> Any:
     return make_kernel()
 
 
-def _make_two_group_reduce_kernel() -> Any:
+def _make_two_group_reduce_kernel(block_threads: int = 128) -> Any:
     @tilelang.jit(out_idx=1, target="cuda")
     def make_kernel():
         def x_layout(i: int, j: int) -> tuple[int, int]:
@@ -123,7 +123,7 @@ def _make_two_group_reduce_kernel() -> Any:
             x: T.Tensor((2, 512), "float32"),
             out: T.Tensor((2,), "float32"),
         ) -> None:
-            with T.Kernel(1, threads=128):
+            with T.Kernel(1, threads=block_threads):
                 x_frag = T.alloc_fragment((2, 512), "float32")
                 out_frag = T.alloc_fragment((2,), "float32")
                 T.annotate_layout(
@@ -325,6 +325,16 @@ def test_reduce_partial_thread_barrier_full_block_groups():
     torch.manual_seed(1)
     x = torch.rand((2, 512), dtype=torch.float32, device="cuda")
     out = _make_two_group_reduce_kernel()(x)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out, x.sum(dim=1), rtol=1e-5, atol=1e-5)
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_reduce_partial_thread_barrier_multiple_groups_in_partial_cta():
+    """Two adjacent 64-thread groups form [0, 128) in a 256-thread CTA."""
+    torch.manual_seed(2)
+    x = torch.rand((2, 512), dtype=torch.float32, device="cuda")
+    out = _make_two_group_reduce_kernel(block_threads=256)(x)
     torch.cuda.synchronize()
     torch.testing.assert_close(out, x.sum(dim=1), rtol=1e-5, atol=1e-5)
 
