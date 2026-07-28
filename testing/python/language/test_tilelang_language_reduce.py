@@ -514,7 +514,56 @@ def _make_partial_full_mixed_reduce_kernel() -> Any:
     return make_kernel()
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def _make_large_unused_reduce_dimension_kernel():
+    """A valid barrier layout whose old Cartesian search exceeded 2^20."""
+    rows = 16385
+    width = 512
+    vector_size = 8
+
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, threads=128):
+            src = T.alloc_fragment((rows, width), T.float32)
+            dst = T.alloc_fragment((rows,), T.float32)
+            T.annotate_layout(
+                {
+                    src: T.Fragment(
+                        src.shape,
+                        forward_fn=lambda i, j: (
+                            j // vector_size,
+                            i * vector_size + j % vector_size,
+                        ),
+                    ),
+                    dst: T.Fragment(
+                        dst.shape,
+                        forward_fn=lambda i, rep: (rep, i),
+                        replicate=64,
+                    ),
+                }
+            )
+            T.fill(src, 1.0)
+            T.reduce_sum(src, dst, dim=1)
+
+    return kernel
+
+
+def _make_sm80_batch_reduce_kernel():
+    @T.prim_func
+    def kernel(
+        A: T.Tensor((128, 64), T.float32),
+        B: T.Tensor((128,), T.float32),
+    ):
+        with T.Kernel(1, threads=256):
+            src = T.alloc_shared((128, 64), T.float32)
+            dst = T.alloc_fragment((128,), T.float32)
+            T.copy(A, src, disable_tma=True)
+            T.reduce_sum(src, dst, dim=1, batch=4)
+            T.copy(dst, B)
+
+    return kernel
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 def test_reduce_partial_thread_barrier_correctness():
     torch.manual_seed(0)
     x = torch.rand((4, 512), dtype=torch.float32, device="cuda")
@@ -528,7 +577,7 @@ def test_reduce_partial_thread_barrier_correctness():
     )
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 def test_reduce_partial_thread_barrier_full_block_groups():
     torch.manual_seed(1)
     x = torch.rand((2, 512), dtype=torch.float32, device="cuda")
@@ -537,7 +586,7 @@ def test_reduce_partial_thread_barrier_full_block_groups():
     torch.testing.assert_close(out, x.sum(dim=1), rtol=1e-5, atol=1e-5)
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 def test_reduce_partial_thread_barrier_multiple_groups_in_partial_cta():
     """Two adjacent 64-thread groups form [0, 128) in a 256-thread CTA."""
     torch.manual_seed(2)
@@ -547,7 +596,7 @@ def test_reduce_partial_thread_barrier_multiple_groups_in_partial_cta():
     torch.testing.assert_close(out, x.sum(dim=1), rtol=1e-5, atol=1e-5)
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 def test_reduce_partial_thread_barrier_offset_thread_range():
     torch.manual_seed(3)
     x = torch.rand((2, 512), dtype=torch.float32, device="cuda")
@@ -561,7 +610,28 @@ def test_reduce_partial_thread_barrier_offset_thread_range():
     )
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_reduce_partial_thread_barrier_ignores_large_unused_layout_dimension():
+    """Barrier resolution enumerates CTA threads, not layout coordinates."""
+    target = {"kind": "cuda", "arch": "sm_80"}
+    with tvm.transform.PassContext(), tvm.target.Target(target):
+        artifact = tilelang.lower(
+            _make_large_unused_reduce_dimension_kernel(), target=target
+        )
+    assert "tl::NamedBarrier<64," in artifact.kernel_source
+    assert "__tl_deferred_scalar_allreduce" not in artifact.kernel_source
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_sm80_batch_reduce_uses_named_barrier():
+    target = {"kind": "cuda", "arch": "sm_80"}
+    with tvm.transform.PassContext(), tvm.target.Target(target):
+        artifact = tilelang.lower(_make_sm80_batch_reduce_kernel(), target=target)
+    assert "NamedBarrier<" in artifact.kernel_source
+    assert "tl::SyncThreadsBarrier" not in artifact.kernel_source
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 def test_reduce_partial_thread_barrier_disjoint_groups():
     """Two independent partial reductions on disjoint thread ranges.
 
@@ -576,7 +646,7 @@ def test_reduce_partial_thread_barrier_disjoint_groups():
     torch.testing.assert_close(out, x.sum(dim=1), rtol=1e-5, atol=1e-5)
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 def test_reduce_partial_thread_barrier_three_concurrent_groups():
     """Three live concurrent reductions claim distinct IDs when the user
     configures enough barrier IDs (K >= 4 cycles through [1, 2, 3])."""
@@ -591,7 +661,7 @@ def test_reduce_partial_thread_barrier_three_concurrent_groups():
     assert len(ids) == 3 and len(set(ids)) == 3, f"barrier IDs must be distinct, got {ids}"
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 def test_named_barrier_start_cycles_reduce_ids():
     """tl.named_barrier_start = K makes reductions claim barrier IDs cycling
     through [1, K-1]; auto-allocated non-reduce barriers start at K."""
@@ -606,7 +676,7 @@ def test_named_barrier_start_cycles_reduce_ids():
     assert ids == [1, 1], f"K=2 should give barrier IDs [1, 1], got {ids}"
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 def test_named_barrier_start_config_validation():
     """Out-of-range tl.named_barrier_start values are rejected at lowering."""
     for bad in (1, 16):
@@ -614,13 +684,13 @@ def test_named_barrier_start_config_validation():
             _make_disjoint_group_reduce_kernel(barrier_start=bad)
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 def test_reduce_partial_thread_barrier_rejects_non_power_of_two_width():
     with pytest.raises(Exception, match="positive power of two"):
         _make_partial_warp_reduce_kernel()
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 def test_reduce_partial_thread_barrier_rejects_warp_misaligned_base():
     """A participating range whose base is not warp-aligned ([16, 80)) would
     leave partially-covered warps, making the full-mask shfl_xor_sync butterfly
@@ -629,7 +699,7 @@ def test_reduce_partial_thread_barrier_rejects_warp_misaligned_base():
         _make_warp_misaligned_base_reduce_kernel()
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 def test_reduce_partial_thread_barrier_partial_full_mixed():
     """A partial reduction (threads 0..63) and a full-block reduction (threads
     0..127) coexist in one kernel: per-reduction barrier rotation gives them
@@ -937,6 +1007,19 @@ def test_finalize_reducer_codegen(op, dtype, block_M, block_N, batch):
         m = re.search(r"NamedBarrier<\d+,\s*\d+>,\s*(\d+)\s*,\s*\d+\s*>::run_batch\(", src)
         assert m is not None, f"Expected run_batch in generated source.\n{src}"
         assert int(m.group(1)) == batch, f"Expected batch={batch}, got {m.group(1)}.\n{src}"
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+@pytest.mark.parametrize("batch", [1, 4])
+def test_finalize_reducer_sm80_uses_named_barrier(batch):
+    target = {"kind": "cuda", "arch": "sm_80"}
+    with tvm.transform.PassContext(config=_COMPILE_FLAGS), tvm.target.Target(target):
+        artifact = tilelang.lower(
+            _make_finalize_reducer_kernel(128, 64, T.float32, "sum", batch),
+            target=target,
+        )
+    assert "NamedBarrier<" in artifact.kernel_source
+    assert "tl::SyncThreadsBarrier" not in artifact.kernel_source
 
 
 @pytest.mark.parametrize(

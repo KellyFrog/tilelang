@@ -200,8 +200,8 @@ struct SyncThreadsBarrier {
 };
 
 // Barrier policy: wraps a named barrier (bar.sync) with a compile-time arrival
-// count and barrier ID. Used on Hopper and later where __syncthreads() cannot
-// be used in certain contexts. A single reduction needs only one barrier ID:
+// count and barrier ID. Used on Ampere and later so partial-CTA reductions do
+// not rely on __syncthreads(). A single reduction needs only one barrier ID:
 // both butterfly phases (and recursion levels) reuse it as separate barrier
 // generations.
 template <int all_threads, int id = 1> struct NamedBarrier {
@@ -233,7 +233,7 @@ template <int all_threads, int id = 1> struct NamedBarrier {
 //                     is a property of the barrier type itself. The codegen
 //                     cycles IDs across reductions. Concurrent reductions must
 //                     fit in the configured reduction ID cycle;
-//                     SyncThreadsBarrier (default) is used on pre-Hopper
+//                     SyncThreadsBarrier (default) is used on pre-Ampere
 //                     targets.
 //   batch_size      - number of independent values to reduce in parallel,
 //                     sharing synchronization barriers across all values.

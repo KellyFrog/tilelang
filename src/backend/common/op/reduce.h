@@ -45,6 +45,13 @@ using namespace ffi;
 
 namespace reduce {
 
+// AllReduce named barriers use PTX bar.sync id, count. This form is available
+// on Ampere; keep the lowering and codegen decisions behind one capability
+// check so they cannot select different barrier policies.
+inline bool TargetSupportsAllReduceNamedBarrier(const Target &target) {
+  return TargetHasSMVersionGE(target, 80);
+}
+
 inline Array<PrimExpr> InputPlaceholders(size_t n) {
   Array<PrimExpr> result;
   result.reserve(n);
@@ -79,19 +86,14 @@ inline Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
 
 /*!
  * \brief Barrier info for a lowered AllReduce call, passed to the backend
- * codegen. Only backends that emit named barriers (CUDA on SM90+) consume
+ * codegen. Only backends that emit named barriers (CUDA on SM80+) consume
  * `participants` and `barrier_id`; backends that use __syncthreads (ROCm,
- * pre-SM90 CUDA) ignore the whole object.
+ * pre-SM80 CUDA) ignore the whole object.
  */
 struct AllReduceBarrier {
-  /*!
-   * \brief Whether only part of the CTA reaches the barrier. False keeps the
-   * whole-CTA codegen (all threads arrive).
-   */
-  bool partial{false};
   /*! \brief Base thread index of the contiguous participating range. */
   int64_t base{0};
-  /*! \brief Named-barrier arrival count; 0 means the whole-CTA barrier. */
+  /*! \brief Exact named-barrier arrival count. */
   int64_t participants{0};
   /*!
    * \brief Named-barrier (bar.sync) ID assigned from the reduction ID cycle.
@@ -102,24 +104,13 @@ struct AllReduceBarrier {
 };
 
 /*!
- * \brief Resolve the thread set that actually reaches a lowered scalar
- * AllReduce call.
+ * \brief Resolve the exact contiguous thread image of a scalar AllReduce.
  *
- * After lowering, PartitionLoop guards the reduce body with exactly this
- * reduce layout (see ReduceLowerer::Lower), so the participant set is a
- * compile-time property of the layout's thread image rather than something
- * that needs a runtime/TIR-level analysis:
- *   - if the image covers the whole CTA, the guard is dropped and every
- *     thread arrives; the legacy whole-CTA barrier stays correct;
- *   - otherwise only the threads in the image execute the call, and the
- *     named-barrier arrival count must be restricted to it. The image is
- *     required to be one contiguous, warp-aligned range [base, base +
- *     participants); anything else is rejected at lowering time instead of
- *     emitting a barrier that only part of the CTA arrives at.
- *
- * \param red_layout The reduce layout the partition guard is derived from.
- * \param thread_bounds The lowered CTA thread range.
- * \param target Lowering target (warp size is read from its attributes).
+ * The result is derived from the reduce layout's forward thread map, which is
+ * also the source of the guard later emitted by PartitionLoop. Z3 counts the
+ * distinct thread IDs in the image while const-int bounds provide its minimum
+ * and maximum; equality between the count and span proves that the image is
+ * contiguous.
  */
 AllReduceBarrier ResolveAllReduceBarrier(const Fragment &red_layout,
                                          const Range &thread_bounds,
@@ -1007,7 +998,7 @@ template <typename Impl> struct ReduceLowerer {
                   .value();
           reduce::AllReduceBarrier barrier;
           if (reducing_threads > 32 &&
-              TargetHasSMVersionGE(lower_args.target, 90)) {
+              reduce::TargetSupportsAllReduceNamedBarrier(lower_args.target)) {
             barrier.barrier_id = reduce::ClaimNamedBarrier(lower_args);
           }
           std::string allreduce = Impl::MakeBatchAllReduce(
@@ -1192,19 +1183,13 @@ template <typename Impl> struct ReduceLowerer {
         reduce::CheckAllReduceWidth(reducing_threads, thread_step.scale,
                                     "tl.reduce");
         auto thread_offset = lower_args.thread_bounds->min;
-        // When only part of the CTA reaches the barrier, resolve the exact
-        // participating thread range from the reduce layout (the very same
-        // layout PartitionLoop later derives the runtime guard from) and
-        // restrict the named barrier to it.
         reduce::AllReduceBarrier barrier;
         if (reducing_threads > 32 &&
-            TargetHasSMVersionGE(lower_args.target, 90)) {
+            reduce::TargetSupportsAllReduceNamedBarrier(lower_args.target)) {
           barrier = reduce::ResolveAllReduceBarrier(
               red_layout, lower_args.thread_bounds, lower_args.target);
           barrier.barrier_id = reduce::ClaimNamedBarrier(lower_args);
-          if (barrier.partial) {
-            thread_offset = Integer(barrier.base);
-          }
+          thread_offset = Integer(barrier.base);
         }
         std::string allreduce = Impl::MakeScalarAllReduce(
             reduce::MakeCodegenReducer(op).value(), reducing_threads,

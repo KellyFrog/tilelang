@@ -27,7 +27,7 @@ struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
-    if (TargetHasSMVersionGE(target, 90)) {
+    if (backend::reduce::TargetSupportsAllReduceNamedBarrier(target)) {
       ss << ", tl::NamedBarrier<" << all_threads << ", " << barrier.barrier_id
          << ">, " << batch << ", " << workspace_stride;
     } else {
@@ -45,7 +45,7 @@ struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
-    if (TargetHasSMVersionGE(target, 90)) {
+    if (backend::reduce::TargetSupportsAllReduceNamedBarrier(target)) {
       ss << ", tl::NamedBarrier<" << all_threads << ", " << barrier.barrier_id
          << ">";
     }

@@ -37,7 +37,7 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
-    if (TargetHasSMVersionGE(target, 90)) {
+    if (backend::reduce::TargetSupportsAllReduceNamedBarrier(target)) {
       ss << ", tl::NamedBarrier<" << all_threads << ", " << barrier.barrier_id
          << ">, " << batch << ", " << workspace_stride;
     } else {
@@ -56,13 +56,9 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
     if (barrier.participants > 0) {
-      // Partial-CTA reduction: exactly `barrier.participants` threads, a
-      // contiguous range starting at `thread_offset`, arrive at the
-      // barrier. `thread_offset` doubles as the shared-memory base so the
-      // butterfly exchange stays inside the participating range.
       ss << ", tl::NamedBarrier<" << barrier.participants << ", "
          << barrier.barrier_id << ">";
-    } else if (TargetHasSMVersionGE(target, 90)) {
+    } else if (backend::reduce::TargetSupportsAllReduceNamedBarrier(target)) {
       ss << ", tl::NamedBarrier<" << all_threads << ", " << barrier.barrier_id
          << ">";
     }

@@ -188,11 +188,12 @@ class PassConfigKey(str, Enum):
     TL_NAMED_BARRIER_START = "tl.named_barrier_start"
     """First auto-allocated (non-reduce) named-barrier (bar.sync) ID. Default: 3.
 
-    Reductions claim barrier IDs cycling through [1, start - 1] (one ID per
-    reduction, reused across butterfly phases as barrier generations); the
-    default 3 keeps barrier IDs 1 and 2 for reductions. Auto-allocated
-    non-reduce barriers (ThreadSync shared-memory syncs) start at this value.
-    Must be in [2, 15]; ID 0 is reserved for __syncthreads.
+    On SM80 and later, cross-warp reductions use PTX ``bar.sync`` and claim
+    barrier IDs cycling through [1, start - 1] (one ID per reduction, reused
+    across butterfly phases as barrier generations); the default 3 keeps
+    barrier IDs 1 and 2 for reductions. Auto-allocated non-reduce barriers
+    (ThreadSync shared-memory syncs) start at this value. Must be in [2, 15];
+    ID 0 is reserved for __syncthreads.
 
     The default safely supports at most two cross-warp reductions whose
     lifetimes can overlap. If a kernel can have C such reductions live
