@@ -1904,14 +1904,14 @@ PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
   planner(stmt);
   stmt =
       ThreadSyncInserter(sync_scope, planner.syncs_inserted_)(std::move(stmt));
-  // Start auto-allocated shared-memory sync barriers past the named barriers
-  // the reductions claimed (LowerTileOp records the next free ID), so the two
-  // pools never collide.
+  // Start auto-allocated shared-memory sync barriers at the first auto-allocated
+  // (non-reduce) named-barrier ID, tl.named_barrier_start, recorded by
+  // LowerTileOp; reductions cycle through [1, start - 1], so the two pools never
+  // collide. When the attribute is absent, fall back to the legacy fixed start.
   size_t base_barrier_id =
       static_cast<size_t>(ReservedNamedBarriers::kFirstUsedBarrier);
   if (auto next = func->GetAttr<Integer>(kNextNamedBarrier)) {
-    base_barrier_id =
-        std::max(base_barrier_id, static_cast<size_t>(next.value()->value));
+    base_barrier_id = static_cast<size_t>(next.value()->value);
   }
   n->body = ThreadPartialSyncRewriter::Rewrite(std::move(stmt), warp_size,
                                                base_barrier_id);

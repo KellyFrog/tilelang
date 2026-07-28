@@ -1,3 +1,4 @@
+import re
 from typing import Any
 
 import tilelang
@@ -210,6 +211,96 @@ def _make_disjoint_group_reduce_kernel(barrier_start: int | None = None) -> Any:
                 T.copy(out_frag, out)
 
         return disjoint_group_reduce
+
+    return make_kernel()
+
+
+def _make_three_disjoint_group_reduce_kernel(barrier_start: int = 3) -> Any:
+    """Three partial reductions that can be live concurrently.
+
+    Each 64-thread group skips the other groups' guarded reductions, so the
+    first and third reductions overlap while using the default two-ID cycle.
+    """
+
+    @tilelang.jit(
+        out_idx=1,
+        target="cuda",
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
+            tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+            tilelang.PassConfigKey.TL_DISABLE_SHARED_MEMORY_REUSE: True,
+            tilelang.PassConfigKey.TL_NAMED_BARRIER_START: barrier_start,
+        },
+    )
+    def make_kernel():
+        @T.prim_func
+        def three_disjoint_group_reduce(
+            x: T.Tensor((3, 512), "float32"),
+            out: T.Tensor((3,), "float32"),
+        ) -> None:
+            with T.Kernel(1, threads=192):
+                first = T.alloc_fragment((1, 512), "float32")
+                second = T.alloc_fragment((1, 512), "float32")
+                third = T.alloc_fragment((1, 512), "float32")
+                first_sum = T.alloc_fragment((1,), "float32")
+                second_sum = T.alloc_fragment((1,), "float32")
+                third_sum = T.alloc_fragment((1,), "float32")
+                out_frag = T.alloc_fragment((3,), "float32")
+                T.annotate_layout(
+                    {
+                        first: T.Fragment(
+                            first.shape,
+                            forward_fn=lambda i, j: (j // 8, j % 8),
+                        ),
+                        second: T.Fragment(
+                            second.shape,
+                            forward_fn=lambda i, j: (64 + j // 8, j % 8),
+                        ),
+                        third: T.Fragment(
+                            third.shape,
+                            forward_fn=lambda i, j: (128 + j // 8, j % 8),
+                        ),
+                        first_sum: T.Fragment(
+                            first_sum.shape,
+                            forward_fn=lambda i, rep: (rep, 0),
+                            replicate=64,
+                        ),
+                        second_sum: T.Fragment(
+                            second_sum.shape,
+                            forward_fn=lambda i, rep: (64 + rep, 0),
+                            replicate=64,
+                        ),
+                        third_sum: T.Fragment(
+                            third_sum.shape,
+                            forward_fn=lambda i, rep: (128 + rep, 0),
+                            replicate=64,
+                        ),
+                        out_frag: T.Fragment(
+                            out_frag.shape,
+                            forward_fn=lambda i, rep: (i * 64 + rep, 0),
+                            replicate=64,
+                        ),
+                    }
+                )
+                for j in T.Parallel(512):
+                    first[0, j] = x[0, j]
+                for j in T.Parallel(512):
+                    second[0, j] = x[1, j]
+                for j in T.Parallel(512):
+                    third[0, j] = x[2, j]
+                tx = T.get_thread_binding()
+                if tx >= 32 and tx < 64:
+                    tvm.tirx.call_extern("void", "__nanosleep", 100000)
+                if tx >= 160 and tx < 192:
+                    tvm.tirx.call_extern("void", "__nanosleep", 100000)
+                T.reduce_sum(first, first_sum, dim=1)
+                T.reduce_sum(second, second_sum, dim=1)
+                T.reduce_sum(third, third_sum, dim=1)
+                for i in T.Parallel(3):
+                    out_frag[i] = first_sum[0] if i == 0 else second_sum[0] if i == 1 else third_sum[0]
+                T.copy(out_frag, out)
+
+        return three_disjoint_group_reduce
 
     return make_kernel()
 
@@ -486,11 +577,24 @@ def test_reduce_partial_thread_barrier_disjoint_groups():
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_reduce_partial_thread_barrier_three_concurrent_groups():
+    """Three live concurrent reductions claim distinct IDs when the user
+    configures enough barrier IDs (K >= 4 cycles through [1, 2, 3])."""
+    torch.manual_seed(6)
+    x = torch.rand((3, 512), dtype=torch.float32, device="cuda")
+    kernel = _make_three_disjoint_group_reduce_kernel(barrier_start=4)
+    src = kernel.get_kernel_source()
+    ids = [int(value) for value in re.findall(r"NamedBarrier<\d+, (\d+)>", src)]
+    out = kernel(x)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out, x.sum(dim=1), rtol=1e-5, atol=1e-5)
+    assert len(ids) == 3 and len(set(ids)) == 3, f"barrier IDs must be distinct, got {ids}"
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_named_barrier_start_cycles_reduce_ids():
     """tl.named_barrier_start = K makes reductions claim barrier IDs cycling
     through [1, K-1]; auto-allocated non-reduce barriers start at K."""
-    import re
-
     # Default K=3: two reductions use barrier IDs 1 and 2.
     src = _make_disjoint_group_reduce_kernel().get_kernel_source()
     ids = [int(x) for x in re.findall(r"NamedBarrier<\d+, (\d+)>", src)]
@@ -830,9 +934,7 @@ def test_finalize_reducer_codegen(op, dtype, block_M, block_N, batch):
     if batch == 1:
         assert "run_batch" not in src, f"batch=1 must not emit run_batch.\n{src}"
     else:
-        m = re.search(
-            r"NamedBarrier<\d+,\s*\d+>,\s*(\d+)\s*,\s*\d+\s*>::run_batch\(", src
-        )
+        m = re.search(r"NamedBarrier<\d+,\s*\d+>,\s*(\d+)\s*,\s*\d+\s*>::run_batch\(", src)
         assert m is not None, f"Expected run_batch in generated source.\n{src}"
         assert int(m.group(1)) == batch, f"Expected batch={batch}, got {m.group(1)}.\n{src}"
 
