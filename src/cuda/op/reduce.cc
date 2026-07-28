@@ -29,28 +29,27 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
     return backend::reduce::GetPreferedVectorizedSize(dt, supports_fp32x2);
   }
 
-  static std::string MakeBatchAllReduce(std::string reducer,
-                                        int reducing_threads, int scale,
-                                        PrimExpr thread_offset,
-                                        PrimExpr all_threads, int batch,
-                                        int workspace_stride, Target target) {
+  static std::string
+  MakeBatchAllReduce(std::string reducer, int reducing_threads, int scale,
+                     PrimExpr thread_offset, PrimExpr all_threads, int batch,
+                     int workspace_stride, Target target, int barrier_id) {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
     if (TargetHasSMVersionGE(target, 90)) {
-      ss << ", tl::NamedBarrier<" << all_threads << ">";
+      ss << ", tl::NamedBarrier<" << all_threads << ", " << barrier_id << ">, "
+         << batch << ", " << workspace_stride;
     } else {
-      ss << ", tl::SyncThreadsBarrier";
+      ss << ", tl::SyncThreadsBarrier, " << batch << ", " << workspace_stride;
     }
-    ss << ", " << batch << ", " << workspace_stride << ">::run_batch";
+    ss << ">::run_batch";
     return ss.str();
   }
 
-  static std::string MakeScalarAllReduce(std::string reducer,
-                                         int reducing_threads, int scale,
-                                         PrimExpr thread_offset,
-                                         PrimExpr all_threads, Target target,
-                                         int barrier_participants) {
+  static std::string
+  MakeScalarAllReduce(std::string reducer, int reducing_threads, int scale,
+                      PrimExpr thread_offset, PrimExpr all_threads,
+                      Target target, int barrier_participants, int barrier_id) {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
@@ -59,9 +58,10 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
       // contiguous range starting at `thread_offset`, arrive at the
       // barrier. `thread_offset` doubles as the shared-memory base so the
       // butterfly exchange stays inside the participating range.
-      ss << ", tl::NamedBarrier<" << barrier_participants << ">";
+      ss << ", tl::NamedBarrier<" << barrier_participants << ", " << barrier_id
+         << ">";
     } else if (TargetHasSMVersionGE(target, 90)) {
-      ss << ", tl::NamedBarrier<" << all_threads << ">";
+      ss << ", tl::NamedBarrier<" << all_threads << ", " << barrier_id << ">";
     }
     ss << ">::run";
     return ss.str();

@@ -195,17 +195,18 @@ struct BitXorOp {
 };
 
 // Barrier policy: wraps __syncthreads().
-// The phase template parameter is ignored (all phases use the same barrier).
 struct SyncThreadsBarrier {
-  template <int phase = 0> static TL_DEVICE void sync() { __syncthreads(); }
+  static TL_DEVICE void sync() { __syncthreads(); }
 };
 
-// Barrier policy: wraps named barrier (bar.sync) with compile-time phase IDs.
-// Used on Hopper and later architectures where __syncthreads() cannot be used
-// in certain contexts.
-template <int all_threads> struct NamedBarrier {
-  template <int phase = 1> static TL_DEVICE void sync() {
-    asm volatile("bar.sync %0, %1;" : : "r"(phase), "r"(all_threads));
+// Barrier policy: wraps a named barrier (bar.sync) with a compile-time arrival
+// count and barrier ID. Used on Hopper and later where __syncthreads() cannot
+// be used in certain contexts. A single reduction needs only one barrier ID:
+// both butterfly phases (and recursion levels) reuse it as separate barrier
+// generations.
+template <int all_threads, int id = 1> struct NamedBarrier {
+  static TL_DEVICE void sync() {
+    asm volatile("bar.sync %0, %1;" : : "r"(id), "r"(all_threads));
   }
 };
 
@@ -227,8 +228,12 @@ template <int all_threads> struct NamedBarrier {
 //                     offset >= 32 goes through shared memory + barrier,
 //                     offset < 32 uses warp shuffle (shfl_xor_sync).
 //   thread_offset   - base thread index offset within the block.
-//   Barrier         - barrier policy type (SyncThreadsBarrier or
-//                     NamedBarrier<N>).
+//   Barrier         - barrier policy type. For named barriers this is
+//                     NamedBarrier<all_threads, barrier_id>, so the barrier ID
+//                     is a property of the barrier type itself. The codegen
+//                     rotates the ID per reduction so multiple reductions in a
+//                     kernel never collide; SyncThreadsBarrier (default) is
+//                     used on pre-Hopper targets.
 //   batch_size      - number of independent values to reduce in parallel,
 //                     sharing synchronization barriers across all values.
 //                     Default 1 preserves the original scalar behaviour.
@@ -275,9 +280,9 @@ private:
   static TL_DEVICE T butterfly_reduce_scalar(T x, T *red_buf) {
     constexpr int offset = threads / 2;
     if constexpr (offset >= 32) {
-      Barrier::template sync<1>();
+      Barrier::sync();
       red_buf[threadIdx.x - thread_offset] = x;
-      Barrier::template sync<2>();
+      Barrier::sync();
       x = Reducer()(x, red_buf[(threadIdx.x - thread_offset) ^ offset]);
     } else {
       x = Reducer()(x, tl::shfl_xor_sync(uint32_t(-1), x, offset));
@@ -293,12 +298,12 @@ private:
   static TL_DEVICE void butterfly_reduce_batch(T *x, T *red_buf) {
     constexpr int offset = threads / 2;
     if constexpr (offset >= 32) {
-      Barrier::template sync<1>();
+      Barrier::sync();
 #pragma unroll
       for (int i = 0; i < batch_size; i++) {
         red_buf[(threadIdx.x - thread_offset) + i * workspace_stride] = x[i];
       }
-      Barrier::template sync<2>();
+      Barrier::sync();
 #pragma unroll
       for (int i = 0; i < batch_size; i++) {
         x[i] =

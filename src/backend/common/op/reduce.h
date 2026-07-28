@@ -270,6 +270,20 @@ ResolveScalarAllReduceBarrier(const Fragment &red_layout,
   return barrier;
 }
 
+// Claim a named-barrier (bar.sync) ID from the per-kernel allocator. A single
+// reduction needs only one barrier ID (reused across butterfly phases as
+// generations), so the allocator advances by 1. Falls back to the legacy fixed
+// ID 1 when no allocator is provided (targets/lowerings that do not thread one
+// through LowerArgs).
+inline int ClaimNamedBarrier(const LowerArgs &lower_args) {
+  if (lower_args.named_barrier_next_id == nullptr) {
+    return 1;
+  }
+  int id = *lower_args.named_barrier_next_id;
+  *lower_args.named_barrier_next_id = id + 1;
+  return id;
+}
+
 inline int64_t SignedMin(int bits) {
   if (bits >= 64) {
     return std::numeric_limits<int64_t>::min();
@@ -1138,10 +1152,15 @@ template <typename Impl> struct ReduceLowerer {
           std::string reducer =
               reduce::MakeCodegenReducer(op, can_batch_pack ? vsize : 1)
                   .value();
+          int barrier_id = 1;
+          if (reducing_threads > 32 &&
+              TargetHasSMVersionGE(lower_args.target, 90)) {
+            barrier_id = reduce::ClaimNamedBarrier(lower_args);
+          }
           std::string allreduce = Impl::MakeBatchAllReduce(
               reducer, reducing_threads, thread_step.scale, thread_offset,
               lower_args.thread_bounds->extent, eff_batch, block_threads,
-              lower_args.target);
+              lower_args.target, barrier_id);
 
           DataType ws_dtype = can_batch_pack
                                   ? clear_buffer->dtype.with_lanes(vsize)
@@ -1325,29 +1344,21 @@ template <typename Impl> struct ReduceLowerer {
         // layout PartitionLoop later derives the runtime guard from) and
         // restrict the named barrier to it.
         reduce::ScalarAllReduceBarrier barrier;
+        int barrier_id = 1;
         if (reducing_threads > 32 &&
             TargetHasSMVersionGE(lower_args.target, 90)) {
           barrier = reduce::ResolveScalarAllReduceBarrier(
               red_layout, lower_args.thread_bounds, lower_args.target);
+          barrier_id = reduce::ClaimNamedBarrier(lower_args);
           if (barrier.partial) {
-            if (lower_args.partial_scalar_reduce_count != nullptr &&
-                *lower_args.partial_scalar_reduce_count > 0) {
-              LOG(FATAL)
-                  << "tl.reduce: more than one partial scalar AllReduce in "
-                     "a kernel would collide on the shared named barrier IDs "
-                     "(1, 2) and workspace. Combine the reductions into a "
-                     "single batch reduction or give them disjoint barriers.";
-            }
-            if (lower_args.partial_scalar_reduce_count != nullptr) {
-              ++(*lower_args.partial_scalar_reduce_count);
-            }
             thread_offset = Integer(barrier.base);
           }
         }
         std::string allreduce = Impl::MakeScalarAllReduce(
             reduce::MakeCodegenReducer(op).value(), reducing_threads,
             thread_step.scale, thread_offset, lower_args.thread_bounds->extent,
-            lower_args.target, static_cast<int>(barrier.participants));
+            lower_args.target, static_cast<int>(barrier.participants),
+            barrier_id);
         Array<PrimExpr> thread_reduce_args = {
             StringImm(allreduce), BufferLoad(clear_buffer, red_indices)};
         if (reducing_threads > 32) {

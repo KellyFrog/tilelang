@@ -55,6 +55,10 @@ template <typename Impl> struct FinalizeReducerLowerer {
     int reducing_threads = extent;
     reduce::CheckAllReduceWidth(reducing_threads, 1, "tl.finalize_reducer");
     auto thread_offset = lower_args.thread_bounds->min;
+    int barrier_id = 1;
+    if (TargetHasSMVersionGE(lower_args.target, 90)) {
+      barrier_id = reduce::ClaimNamedBarrier(lower_args);
+    }
 
     int64_t layout_batch_size = 1;
     for (int i = 0; i < layout->OutputDim(); ++i) {
@@ -87,7 +91,7 @@ template <typename Impl> struct FinalizeReducerLowerer {
       std::string allreduce = Impl::MakeBatchAllReduce(
           op_str, reducing_threads, 1, thread_offset,
           lower_args.thread_bounds->extent, static_cast<int>(effective_batch),
-          workspace_stride, lower_args.target);
+          workspace_stride, lower_args.target, barrier_id);
       int ws_size = workspace_stride * static_cast<int>(effective_batch);
       PrimExpr workspace = lower_args.add_workspace(ws_size, buffer->dtype);
       Array<PrimExpr> args = {StringImm(allreduce), buffer->data, workspace};
@@ -96,7 +100,7 @@ template <typename Impl> struct FinalizeReducerLowerer {
 
     std::string allreduce = Impl::MakeScalarAllReduce(
         op_str, reducing_threads, 1, thread_offset,
-        lower_args.thread_bounds->extent, lower_args.target);
+        lower_args.thread_bounds->extent, lower_args.target, barrier_id);
     Array<PrimExpr> thread_reduce_args = {StringImm(allreduce),
                                           BufferLoad(buffer, indices_0)};
     if (reducing_threads > Impl::WarpSize(lower_args.target)) {

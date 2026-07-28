@@ -154,6 +154,10 @@ def _make_disjoint_group_reduce_kernel() -> Any:
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
             tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+            # Two reductions on disjoint thread groups execute concurrently;
+            # disable shared-memory lifetime reuse so their AllReduce workspaces
+            # get distinct regions instead of aliasing.
+            tilelang.PassConfigKey.TL_DISABLE_SHARED_MEMORY_REUSE: True,
         },
     )
     def make_kernel():
@@ -306,6 +310,119 @@ def _make_partial_warp_reduce_kernel() -> Any:
     return make_kernel()
 
 
+def _make_warp_misaligned_base_reduce_kernel() -> Any:
+    """Partial reduction whose participating range base is not warp-aligned,
+    i.e. tx in [16, 80). The shfl_xor_sync full-mask butterfly is only defined
+    when every participating warp is fully covered, so lowering must reject it."""
+
+    @tilelang.jit(
+        out_idx=1,
+        target="cuda",
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
+            tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+        },
+    )
+    def make_kernel():
+        @T.prim_func
+        def warp_misaligned_base_reduce(
+            x: T.Tensor((1, 512), "float32"),
+            out: T.Tensor((1,), "float32"),
+        ) -> None:
+            with T.Kernel(1, threads=128):
+                x_frag = T.alloc_fragment((1, 512), "float32")
+                sum_frag = T.alloc_fragment((1,), "float32")
+                T.annotate_layout(
+                    {
+                        x_frag: T.Fragment(
+                            x_frag.shape,
+                            forward_fn=lambda i, j: (16 + j // 8, j % 8),
+                        ),
+                        sum_frag: T.Fragment(
+                            sum_frag.shape,
+                            forward_fn=lambda i, rep: (16 + rep, 0),
+                            replicate=64,
+                        ),
+                    }
+                )
+                for i, j in T.Parallel(1, 512):
+                    x_frag[i, j] = x[i, j]
+                T.reduce_sum(x_frag, sum_frag, dim=1)
+                for i in T.Parallel(1):
+                    out[i] = sum_frag[i]
+
+        return warp_misaligned_base_reduce
+
+    return make_kernel()
+
+
+def _make_partial_full_mixed_reduce_kernel() -> Any:
+    """One partial reduction (threads 0..63 via j//8) and one full-block
+    reduction (threads 0..127 via j//4) in the same kernel. They must get
+    distinct named barrier IDs and not collide."""
+
+    @tilelang.jit(
+        out_idx=1,
+        target="cuda",
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
+            tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+            # The full-block reduction's extra threads (64..127) can race ahead
+            # into its workspace while the partial reduction is still running;
+            # disable shared-memory lifetime reuse so the workspaces are
+            # disjoint.
+            tilelang.PassConfigKey.TL_DISABLE_SHARED_MEMORY_REUSE: True,
+        },
+    )
+    def make_kernel():
+        @T.prim_func
+        def partial_full_mixed_reduce(
+            x: T.Tensor((2, 512), "float32"),
+            out: T.Tensor((2, 512), "float32"),
+        ) -> None:
+            with T.Kernel(1, threads=128):
+                first = T.alloc_fragment((1, 512), "float32")
+                second = T.alloc_fragment((1, 512), "float32")
+                first_sum = T.alloc_fragment((1,), "float32")
+                second_sum = T.alloc_fragment((1,), "float32")
+                T.annotate_layout(
+                    {
+                        first: T.Fragment(
+                            first.shape,
+                            forward_fn=lambda i, j: (j // 8, j % 8),
+                        ),
+                        second: T.Fragment(
+                            second.shape,
+                            forward_fn=lambda i, j: (j // 4, j % 4),
+                        ),
+                        first_sum: T.Fragment(
+                            first_sum.shape,
+                            forward_fn=lambda i, rep: (rep, 0),
+                            replicate=64,
+                        ),
+                        second_sum: T.Fragment(
+                            second_sum.shape,
+                            forward_fn=lambda i, rep: (rep, 0),
+                            replicate=128,
+                        ),
+                    }
+                )
+                for j in T.Parallel(512):
+                    first[0, j] = x[0, j]
+                for j in T.Parallel(512):
+                    second[0, j] = x[1, j]
+                T.reduce_sum(first, first_sum, dim=1)
+                T.reduce_sum(second, second_sum, dim=1)
+                for j in T.Parallel(512):
+                    out[0, j] = first[0, j] / first_sum[0]
+                for j in T.Parallel(512):
+                    out[1, j] = second[0, j] / second_sum[0]
+
+        return partial_full_mixed_reduce
+
+    return make_kernel()
+
+
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_reduce_partial_thread_barrier_correctness():
     torch.manual_seed(0)
@@ -354,22 +471,50 @@ def test_reduce_partial_thread_barrier_offset_thread_range():
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-def test_reduce_partial_thread_barrier_rejects_disjoint_groups():
+def test_reduce_partial_thread_barrier_disjoint_groups():
     """Two independent partial reductions on disjoint thread ranges.
 
-    Each reduction individually resolves to a contiguous participating range
-    ([0, 64) and [64, 128)), but two partial scalar AllReduces in one kernel
-    would reuse the same named barrier IDs and shared workspace, so the second
-    one is rejected at lowering time.
+    Each reduction claims a distinct named barrier ID (per-reduction rotation),
+    so the two reductions complete correctly instead of colliding on barrier IDs
+    (1, 2).
     """
-    with pytest.raises(Exception, match="collide on the shared named barrier IDs"):
-        _make_disjoint_group_reduce_kernel()
+    torch.manual_seed(5)
+    x = torch.rand((2, 512), dtype=torch.float32, device="cuda")
+    out = _make_disjoint_group_reduce_kernel()(x)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out, x.sum(dim=1), rtol=1e-5, atol=1e-5)
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_reduce_partial_thread_barrier_rejects_non_power_of_two_width():
     with pytest.raises(Exception, match="positive power of two"):
         _make_partial_warp_reduce_kernel()
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_reduce_partial_thread_barrier_rejects_warp_misaligned_base():
+    """A participating range whose base is not warp-aligned ([16, 80)) would
+    leave partially-covered warps, making the full-mask shfl_xor_sync butterfly
+    undefined. Lowering must reject it."""
+    with pytest.raises(Exception, match="warp-aligned participating thread range"):
+        _make_warp_misaligned_base_reduce_kernel()
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_reduce_partial_thread_barrier_partial_full_mixed():
+    """A partial reduction (threads 0..63) and a full-block reduction (threads
+    0..127) coexist in one kernel: per-reduction barrier rotation gives them
+    distinct named barrier IDs."""
+    torch.manual_seed(7)
+    x = torch.rand((2, 512), dtype=torch.float32, device="cuda")
+    out = _make_partial_full_mixed_reduce_kernel()(x)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(
+        out,
+        x / x.sum(dim=1, keepdim=True),
+        rtol=1e-5,
+        atol=1e-6,
+    )
 
 
 @tilelang.testing.requires_cuda_compute_version_lt(9, 0)
@@ -684,7 +829,9 @@ def test_finalize_reducer_codegen(op, dtype, block_M, block_N, batch):
     if batch == 1:
         assert "run_batch" not in src, f"batch=1 must not emit run_batch.\n{src}"
     else:
-        m = re.search(r",\s*(\d+)\s*,\s*\d+\s*>::run_batch\(", src)
+        m = re.search(
+            r"NamedBarrier<\d+,\s*\d+>,\s*(\d+)\s*,\s*\d+\s*>::run_batch\(", src
+        )
         assert m is not None, f"Expected run_batch in generated source.\n{src}"
         assert int(m.group(1)) == batch, f"Expected batch={batch}, got {m.group(1)}.\n{src}"
 

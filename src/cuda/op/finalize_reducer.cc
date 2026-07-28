@@ -19,32 +19,33 @@ namespace cuda {
 struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
   static int WarpSize(Target target) { return TargetCudaGetWarpSize(target); }
 
-  static std::string MakeBatchAllReduce(std::string reducer,
-                                        int reducing_threads, int scale,
-                                        PrimExpr thread_offset,
-                                        PrimExpr all_threads, int batch,
-                                        int workspace_stride, Target target) {
+  static std::string
+  MakeBatchAllReduce(std::string reducer, int reducing_threads, int scale,
+                     PrimExpr thread_offset, PrimExpr all_threads, int batch,
+                     int workspace_stride, Target target, int barrier_id) {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
     if (TargetHasSMVersionGE(target, 90)) {
-      ss << ", tl::NamedBarrier<" << all_threads << ">";
+      ss << ", tl::NamedBarrier<" << all_threads << ", " << barrier_id << ">, "
+         << batch << ", " << workspace_stride;
     } else {
-      ss << ", tl::SyncThreadsBarrier";
+      ss << ", tl::SyncThreadsBarrier, " << batch << ", " << workspace_stride;
     }
-    ss << ", " << batch << ", " << workspace_stride << ">::run_batch";
+    ss << ">::run_batch";
     return ss.str();
   }
 
   static std::string MakeScalarAllReduce(std::string reducer,
                                          int reducing_threads, int scale,
                                          PrimExpr thread_offset,
-                                         PrimExpr all_threads, Target target) {
+                                         PrimExpr all_threads, Target target,
+                                         int barrier_id) {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
     if (TargetHasSMVersionGE(target, 90)) {
-      ss << ", tl::NamedBarrier<" << all_threads << ">";
+      ss << ", tl::NamedBarrier<" << all_threads << ", " << barrier_id << ">";
     }
     ss << ">::run";
     return ss.str();

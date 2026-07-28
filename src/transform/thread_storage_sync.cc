@@ -239,15 +239,19 @@ private:
 
 class ThreadPartialSyncRewriter : public IRMutatorWithAnalyzer {
 public:
-  static Stmt Rewrite(Stmt stmt, int warp_size = 32) {
+  static Stmt Rewrite(Stmt stmt, int warp_size = 32,
+                      size_t base_barrier_id = static_cast<size_t>(
+                          ReservedNamedBarriers::kFirstUsedBarrier)) {
     arith::Analyzer analyzer;
-    ThreadPartialSyncRewriter rewriter(&analyzer, warp_size);
+    ThreadPartialSyncRewriter rewriter(&analyzer, warp_size, base_barrier_id);
     return rewriter(std::move(stmt));
   }
 
 private:
-  explicit ThreadPartialSyncRewriter(arith::Analyzer *analyzer, int warp_size)
-      : IRMutatorWithAnalyzer(analyzer), warp_size_(warp_size) {}
+  explicit ThreadPartialSyncRewriter(arith::Analyzer *analyzer, int warp_size,
+                                     size_t base_barrier_id)
+      : IRMutatorWithAnalyzer(analyzer), warp_size_(warp_size),
+        base_barrier_id_(base_barrier_id) {}
 
   Stmt VisitStmt_(const EvaluateNode *op) final {
     const CallNode *call = nullptr;
@@ -323,9 +327,7 @@ private:
       return {barrier_id_map_[key], thread_count_map_[key]};
     }
 
-    size_t barrier_id =
-        barrier_id_map_.size() +
-        static_cast<size_t>(ReservedNamedBarriers::kFirstUsedBarrier);
+    size_t barrier_id = barrier_id_map_.size() + base_barrier_id_;
     size_t thread_count = extent_tx * extent_ty * extent_tz;
 
     barrier_id_map_[key] = barrier_id;
@@ -409,6 +411,7 @@ private:
   std::unordered_map<ThreadBoundKey, size_t> barrier_id_map_;
   std::unordered_map<ThreadBoundKey, size_t> thread_count_map_;
   int warp_size_;
+  size_t base_barrier_id_;
 };
 
 struct ConditionThreadProperty {
@@ -1893,7 +1896,17 @@ PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
   planner(stmt);
   stmt =
       ThreadSyncInserter(sync_scope, planner.syncs_inserted_)(std::move(stmt));
-  n->body = ThreadPartialSyncRewriter::Rewrite(std::move(stmt), warp_size);
+  // Start auto-allocated shared-memory sync barriers past the named barriers
+  // the reductions claimed (LowerTileOp records the next free ID), so the two
+  // pools never collide.
+  size_t base_barrier_id =
+      static_cast<size_t>(ReservedNamedBarriers::kFirstUsedBarrier);
+  if (auto next = func->GetAttr<Integer>(kNextNamedBarrier)) {
+    base_barrier_id =
+        std::max(base_barrier_id, static_cast<size_t>(next.value()->value));
+  }
+  n->body = ThreadPartialSyncRewriter::Rewrite(std::move(stmt), warp_size,
+                                               base_barrier_id);
   return func;
 }
 

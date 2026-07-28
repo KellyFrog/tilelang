@@ -23,6 +23,7 @@
 #include "../op/gemm_sp.h"
 #include "../op/operator.h"
 #include "../op/utils.h"
+#include "config.h"
 #include "cuda/target_utils.h"
 #include "cuda/transform/ptx_async_copy_injector.h"
 
@@ -207,6 +208,7 @@ public:
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
     ICHECK(target.defined()) << "LowerTileOpPass: Require the target attribute";
     substituter.target_ = target.value();
+    substituter.named_barrier_next_id_ = tl_config::NamedBarrierStart();
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = substituter.VisitStmt(f->body);
     fptr->body =
@@ -217,6 +219,10 @@ public:
     // later phases (OptimizeForTarget) can choose the right pass pipeline
     // without relying on pass-context side-channel mutation.
     f = WithAttr(std::move(f), kHasTMA, Bool(substituter.has_tma_));
+    // Hand the next free named-barrier ID to ThreadSync so its auto-allocated
+    // shared-memory sync barriers start past the reduction barriers.
+    f = WithAttr(std::move(f), kNextNamedBarrier,
+                 IntImm(DataType::Int(32), substituter.named_barrier_next_id_));
     // Propagate per-buffer shared-memory alignment requirements collected
     // during lowering (swizzle-dependent TMA/MMA constraints) so that
     // MergeSharedMemoryAllocations can honor them when laying out the merged
@@ -1191,7 +1197,7 @@ private:
     lower_args.alloc_mbarrier = mbarrier_callback;
     lower_args.update_barrier_arrive = barrier_arrive_callback;
     lower_args.require_smem_alignment = require_smem_alignment_callback;
-    lower_args.partial_scalar_reduce_count = &partial_scalar_reduce_count_;
+    lower_args.named_barrier_next_id = &named_barrier_next_id_;
 
     auto lowered = tile_op->Lower(lower_args, analyzer_);
 
@@ -1544,10 +1550,11 @@ private:
   // alloc_mbarrier callback. Used to inject a barrier buffer with
   // barrier_init annotation into the root block after all tile ops are lowered.
   int mbarrier_count_{0};
-  // Number of partial scalar AllReduce calls lowered so far in this kernel.
-  // Two of them would collide on named barrier IDs (1, 2) and the shared
-  // workspace, so the reduce lowering rejects the second.
-  int partial_scalar_reduce_count_{0};
+  // Next free named-barrier (bar.sync) ID. Barrier ID 0 is reserved for
+  // __syncthreads. Initialized from `tl.named_barrier_start` (default 1, so
+  // the first AllReduce keeps the legacy barrier ID 1); every AllReduce
+  // emitting a NamedBarrier claims one ID and advances this by 1.
+  int named_barrier_next_id_{1};
   std::vector<int> mbarrier_arrive_counts_;
   // The shared.barrier scope buffer created lazily by alloc_mbarrier callback.
   Optional<Buffer> mbarrier_buffer_;

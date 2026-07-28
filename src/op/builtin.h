@@ -85,6 +85,12 @@ static constexpr const char *kDebugMergeSharedMemoryAllocations =
 // PrimFunc attribute: set by LowerTileOp to indicate TMA operations were
 // actually generated.  Read by OptimizeForTarget to pick the right pipeline.
 static constexpr const char *kHasTMA = "tl.has_tma";
+// PrimFunc attribute: IntImm, the next free named-barrier (bar.sync) ID after
+// all scalar/batch AllReduce reductions in this kernel have claimed theirs
+// (one ID per reduction). Set by LowerTileOp; read by ThreadSync so its
+// auto-allocated shared-memory sync barriers start past the reduction
+// barriers instead of colliding with them.
+static constexpr const char *kNextNamedBarrier = "tl.next_named_barrier";
 // PrimFunc attribute: Map<String, IntImm> from a shared buffer's data Var
 // name to the minimum base alignment (bytes) required by swizzle-sensitive
 // instructions that consume it (TMA bulk copy, wgmma/tcgen05 descriptors).

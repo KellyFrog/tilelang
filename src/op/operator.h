@@ -140,12 +140,15 @@ struct LowerArgs {
   // alignment implied by the chosen swizzle mode here; LowerTileOp collects
   // the results into the kSmemAlignmentMap PrimFunc attribute.
   RequireSmemAlignmentCallback require_smem_alignment = nullptr;
-  // Per-kernel counter of partial scalar AllReduce calls already lowered.
-  // Two such calls in one kernel would reuse the same named barrier IDs
-  // (1, 2) and shared workspace, so the reduce lowering rejects the second
-  // one. Points to a LowerTileOpPass-owned counter; nullptr when the
-  // lowering does not provide one.
-  int *partial_scalar_reduce_count = nullptr;
+  // Per-kernel named-barrier (bar.sync) ID allocator. `bar.sync id, n`: id 0
+  // is reserved for __syncthreads. Every AllReduce that emits a NamedBarrier
+  // claims a barrier ID from this allocator (one per reduction, since a single
+  // reduction reuses its one barrier ID across butterfly phases as
+  // generations), so multiple reductions (tl.reduce, tl.finalize_reducer) in
+  // one kernel never reuse the same barrier ID and interleave their barrier
+  // arrivals. Points to the next free ID in a LowerTileOpPass member; nullptr
+  // falls back to the legacy fixed ID 1.
+  int *named_barrier_next_id = nullptr;
 };
 
 struct LayoutInferArgs {
