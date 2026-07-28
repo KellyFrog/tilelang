@@ -129,7 +129,7 @@ AllReduceBarrier ResolveAllReduceBarrier(const Fragment &red_layout,
 // reduction needs only one barrier ID (reused across butterfly phases as
 // generations), so the allocator advances by 1. The returned ID cycles through
 // [1, named_barrier_cycle] (default 2, i.e. barrier IDs 1 and 2), reserving
-// named_barrier_cycle + 1 .. kMaxNamedBarrier for auto-allocated non-reduce
+// named_barrier_cycle + 1 .. kMaxNamedBarrierId for auto-allocated non-reduce
 // barriers (ThreadSync). Reusing IDs is safe for sequential reductions (each
 // barrier ID is generation-counted by the hardware); concurrent reductions on
 // different thread groups must not exceed named_barrier_cycle simultaneously

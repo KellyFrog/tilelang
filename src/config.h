@@ -49,8 +49,9 @@ inline int NamedBarrierStart() {
       ctxt->GetConfig(kNamedBarrierStart, ffi::Optional<Integer>())
           .value_or(Integer(3))
           ->value);
-  if (start < 2 || start > 15) {
-    LOG(FATAL) << "tl.named_barrier_start must be in [2, 15], got " << start;
+  if (start < 2 || start > kMaxNamedBarrierId) {
+    LOG(FATAL) << "tl.named_barrier_start must be in [2, " << kMaxNamedBarrierId
+               << "], got " << start;
   }
   return start;
 }

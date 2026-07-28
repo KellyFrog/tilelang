@@ -85,6 +85,9 @@ static constexpr const char *kDebugMergeSharedMemoryAllocations =
 // PrimFunc attribute: set by LowerTileOp to indicate TMA operations were
 // actually generated.  Read by OptimizeForTarget to pick the right pipeline.
 static constexpr const char *kHasTMA = "tl.has_tma";
+// Highest valid CTA named-barrier ID. Hardware provides IDs 0..15; ID 0 is
+// reserved for __syncthreads, so explicitly allocated barriers use IDs 1..15.
+inline constexpr int kMaxNamedBarrierId = 15;
 // PrimFunc attribute: IntImm, the first auto-allocated (non-reduce) named
 // barrier (bar.sync) ID for this kernel, equal to tl.named_barrier_start.
 // Reductions claim IDs cycling through [1, start - 1]; ThreadSync starts its

@@ -328,13 +328,13 @@ private:
     }
 
     size_t barrier_id = barrier_id_map_.size() + base_barrier_id_;
-    if (barrier_id > static_cast<size_t>(kMaxNamedBarrier)) {
-      LOG(FATAL) << "[ThreadSync] named-barrier ID exhaustion: this kernel "
-                    "needs more than "
-                 << kMaxNamedBarrier - 1
-                 << " cross-warp named barriers (IDs 1.." << kMaxNamedBarrier
-                 << "; ID 0 is reserved for __syncthreads). Reduce the number "
-                    "of divergent shared-memory sync regions or reductions.";
+    if (barrier_id == 0 ||
+        barrier_id > static_cast<size_t>(kMaxNamedBarrierId)) {
+      LOG(FATAL) << "[ThreadSync] cannot allocate named-barrier ID "
+                 << barrier_id << "; valid IDs are 1.." << kMaxNamedBarrierId
+                 << " (ID 0 is reserved for __syncthreads). Reduce the number "
+                    "of divergent shared-memory sync regions or lower "
+                    "tl.named_barrier_start.";
     }
     size_t thread_count = extent_tx * extent_ty * extent_tz;
 
@@ -1904,10 +1904,11 @@ PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
   planner(stmt);
   stmt =
       ThreadSyncInserter(sync_scope, planner.syncs_inserted_)(std::move(stmt));
-  // Start auto-allocated shared-memory sync barriers at the first auto-allocated
-  // (non-reduce) named-barrier ID, tl.named_barrier_start, recorded by
-  // LowerTileOp; reductions cycle through [1, start - 1], so the two pools never
-  // collide. When the attribute is absent, fall back to the legacy fixed start.
+  // Start auto-allocated shared-memory sync barriers at the first
+  // auto-allocated (non-reduce) named-barrier ID, tl.named_barrier_start,
+  // recorded by LowerTileOp; reductions cycle through [1, start - 1], so the
+  // two pools never collide. When the attribute is absent, fall back to the
+  // legacy fixed start.
   size_t base_barrier_id =
       static_cast<size_t>(ReservedNamedBarriers::kFirstUsedBarrier);
   if (auto next = func->GetAttr<Integer>(kNextNamedBarrier)) {

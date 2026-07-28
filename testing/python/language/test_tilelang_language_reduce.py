@@ -1129,7 +1129,7 @@ def test_allreduce_scale_greater_than_one_valid_runtime(logical_width, scale):
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("reduce_fn", [T.reduce_sum, T.reduce_max], ids=["sum", "max"])
 def test_allreduce_scale_greater_than_one_rejects_non_power_of_two(reduce_fn):
-    with pytest.raises(Exception, match="logical_width.*positive power of two"):
+    with pytest.raises(Exception, match=r"logical_width.*positive power of two"):
         _compile(_make_allreduce_dim0_scale_kernel(reduce_fn, 48, 2))
 
 
