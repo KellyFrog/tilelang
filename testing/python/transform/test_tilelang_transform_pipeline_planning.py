@@ -740,6 +740,38 @@ def test_pipeline_planning_stages_bind_with_dependent_copy():
     assert replayable_binds == [1, 0, 0]
 
 
+def test_pipeline_planning_propagates_buffer_producer_through_bind():
+    @T.prim_func
+    def before(
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=256):
+            index_shared = T.alloc_shared((1,), T.int32)
+            A_shared = T.alloc_shared((32,), T.float16)
+            for k in T.Pipelined(2, num_stages=2):
+                index_shared[0] = k * 32
+                offset = index_shared[0]
+                T.copy(A[offset], A_shared)
+                for i in T.Parallel(32):
+                    B[k * 32 + i] = A_shared[i]
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert annos, "Expected at least one loop annotated by PipelinePlanning"
+    stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
+    orders = [int(v) for v in annos[0]["software_pipeline_order"]]
+
+    # The shared-buffer store and the Bind that reads it are both producers of
+    # the copy's scalar offset.  They must remain ahead of the copy in stage 0.
+    assert stages == [0, 0, 0, 1]
+    assert orders == [0, 1, 2, 3]
+
+    # This dependency used to be rejected by InjectSoftwarePipeline because
+    # PipelinePlanning placed the store in a later stage than the Bind.
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
 def test_pipeline_planning_accepts_explicit_bind_free_annotations():
     @T.prim_func
     def before(

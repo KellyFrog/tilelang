@@ -781,7 +781,7 @@ public:
     return scalar_def_to_stmt;
   }
 
-  void PropagateScalarProducersForCopy(
+  void PropagateScalarAndBufferProducersForCopy(
       std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
     auto scalar_def_to_stmt = BuildScalarDefMap(*pipeline_stage_infos);
     const size_t max_iterations = (pipeline_stage_infos->size() * 4) + 16;
@@ -825,6 +825,40 @@ public:
             continue;
           }
           updated |= update_producer(&producer, consumer.last_use_stmt_index);
+        }
+
+        // A scalar producer may itself load a buffer.  Follow that buffer
+        // dependency here so mixed chains such as
+        //
+        //   shared[index] = value;
+        //   offset = shared[index];
+        //   copy(global[offset], shared_dst);
+        //
+        // reach a joint fixed point.  The earlier buffer-only propagation
+        // runs before scalar producers are known, so it cannot discover the
+        // store after the Bind is pulled into the copy's producer stage.
+        for (int producer_idx = 0; producer_idx < consumer_idx;
+             ++producer_idx) {
+          auto &producer = (*pipeline_stage_infos)[producer_idx];
+          if (producer.IsCopyStage()) {
+            continue;
+          }
+          bool has_buffer_dependency = false;
+          for (const BufferRegion &write : producer.writes) {
+            for (const BufferRegion &read : consumer.reads) {
+              if (write->buffer.same_as(read->buffer) &&
+                  MayConflict(write->region, read->region)) {
+                has_buffer_dependency = true;
+                break;
+              }
+            }
+            if (has_buffer_dependency) {
+              break;
+            }
+          }
+          if (has_buffer_dependency) {
+            updated |= update_producer(&producer, consumer.last_use_stmt_index);
+          }
         }
       }
       if (++iter_count > max_iterations) {
@@ -1042,9 +1076,10 @@ private:
     MakeStageAnalyzer().PropagateBufferProducersForCopy(pipeline_stage_infos);
   }
 
-  void PropagateScalarProducersForCopy(
+  void PropagateScalarAndBufferProducersForCopy(
       std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
-    MakeStageAnalyzer().PropagateScalarProducersForCopy(pipeline_stage_infos);
+    MakeStageAnalyzer().PropagateScalarAndBufferProducersForCopy(
+        pipeline_stage_infos);
   }
 
   void ValidateScalarDependencies(
@@ -1220,7 +1255,10 @@ private:
     // pipeline schedule.
     AnalyzeCopyLastUse(&pipeline_stage_infos);
 
-    PropagateScalarProducersForCopy(&pipeline_stage_infos);
+    // Scalar producers can expose additional buffer dependencies (for
+    // example, a Bind that loads a shared-memory index used by a copy).  Close
+    // over both dependency kinds before assigning stages.
+    PropagateScalarAndBufferProducersForCopy(&pipeline_stage_infos);
 
     // Making stages and orders
     int order_idx = 0;
