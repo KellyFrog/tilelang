@@ -703,19 +703,25 @@ public:
     return scalar_def_to_stmt;
   }
 
-  std::vector<std::vector<int>> BuildProducerDependencyGraph(
+  struct ProducerDependencyDag {
+    std::vector<std::vector<int>> predecessors;
+  };
+
+  ProducerDependencyDag BuildProducerDependencyDag(
       const std::vector<PipelineStageInfo> &pipeline_stage_infos) const {
     const int num_stmts = static_cast<int>(pipeline_stage_infos.size());
-    std::vector<std::vector<int>> predecessors(num_stmts);
+    ProducerDependencyDag dag;
+    dag.predecessors.resize(num_stmts);
     auto scalar_def_to_stmt = BuildScalarDefMap(pipeline_stage_infos);
 
-    auto add_predecessor = [&](int consumer_idx, int producer_idx) {
-      if (producer_idx < 0 || producer_idx >= consumer_idx) {
-        return;
-      }
-      auto &deps = predecessors[consumer_idx];
-      if (std::find(deps.begin(), deps.end(), producer_idx) == deps.end()) {
-        deps.push_back(producer_idx);
+    auto add_edge = [&](int src, int dst) {
+      ICHECK_LT(src, dst)
+          << "PipelinePlanning expects producer dependencies to follow source "
+             "order";
+      auto &predecessors = dag.predecessors[dst];
+      if (std::find(predecessors.begin(), predecessors.end(), src) ==
+          predecessors.end()) {
+        predecessors.push_back(src);
       }
     };
 
@@ -723,8 +729,8 @@ public:
       const auto &consumer = pipeline_stage_infos[consumer_idx];
       for (const VarNode *var : consumer.scalar_uses) {
         auto it = scalar_def_to_stmt.find(var);
-        if (it != scalar_def_to_stmt.end()) {
-          add_predecessor(consumer_idx, it->second);
+        if (it != scalar_def_to_stmt.end() && it->second != consumer_idx) {
+          add_edge(it->second, consumer_idx);
         }
       }
 
@@ -747,38 +753,33 @@ public:
           }
         }
         if (has_buffer_dependency) {
-          add_predecessor(consumer_idx, producer_idx);
+          add_edge(producer_idx, consumer_idx);
         }
       }
     }
-    return predecessors;
+    return dag;
   }
 
   void PropagateProducersForCopy(
       std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
     const int num_stmts = static_cast<int>(pipeline_stage_infos->size());
-    std::vector<std::vector<int>> predecessors =
-        BuildProducerDependencyGraph(*pipeline_stage_infos);
+    ProducerDependencyDag dag =
+        BuildProducerDependencyDag(*pipeline_stage_infos);
 
     // First compute the complete backward closure independently of scheduling
-    // anchors.  This allows scalar and buffer dependencies to alternate for
-    // an arbitrary number of steps.
-    std::vector<int> worklist;
+    // anchors.  Every edge follows source order, so reverse source order is a
+    // reverse topological traversal and handles arbitrarily alternating scalar
+    // and buffer dependencies in one pass.
     std::vector<bool> reaches_copy(num_stmts, false);
-    for (int i = 0; i < num_stmts; ++i) {
-      if ((*pipeline_stage_infos)[i].IsCopyStage()) {
-        reaches_copy[i] = true;
-        worklist.push_back(i);
+    for (int consumer_idx = num_stmts - 1; consumer_idx >= 0; --consumer_idx) {
+      if ((*pipeline_stage_infos)[consumer_idx].IsCopyStage()) {
+        reaches_copy[consumer_idx] = true;
       }
-    }
-    while (!worklist.empty()) {
-      int consumer_idx = worklist.back();
-      worklist.pop_back();
-      for (int producer_idx : predecessors[consumer_idx]) {
-        if (!reaches_copy[producer_idx]) {
-          reaches_copy[producer_idx] = true;
-          worklist.push_back(producer_idx);
-        }
+      if (!reaches_copy[consumer_idx]) {
+        continue;
+      }
+      for (int producer_idx : dag.predecessors[consumer_idx]) {
+        reaches_copy[producer_idx] = true;
       }
     }
 
@@ -803,7 +804,7 @@ public:
       if (!(consumer.IsFirstStage() && consumer.IsLastUseStmtIndexValid())) {
         continue;
       }
-      for (int producer_idx : predecessors[consumer_idx]) {
+      for (int producer_idx : dag.predecessors[consumer_idx]) {
         auto &producer = (*pipeline_stage_infos)[producer_idx];
         if (!producer.IsFirstStage()) {
           continue;
