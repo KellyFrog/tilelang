@@ -13,6 +13,7 @@ import sys
 import threading
 
 import torch
+from tilelang._torch_dlpack import initialize_torch_c_dlpack
 from tilelang import tvm
 from tvm import runtime, tirx
 from tvm.target import Target
@@ -76,6 +77,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     _torch_npu_stream_exchange_installed: bool = False
 
     def _prepare_torch_device(self, device: torch.device) -> None:
+        if device.type == "cuda":
+            initialize_torch_c_dlpack()
         if device.type == "npu" and not self._torch_npu_stream_exchange_installed:
             _install_torch_stream_exchange()
             self._torch_npu_stream_exchange_installed = True

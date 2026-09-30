@@ -11,7 +11,7 @@ from typing import Literal
 
 import torch
 
-from tilelang.utils.device import IS_CUDA, IS_NPU, Event, device_synchronize
+from tilelang.utils.device import Event, device_synchronize
 
 from .torch_bench import (
     _CACHE_FLUSH_ID as _CACHE_FLUSH_ID,
@@ -25,7 +25,7 @@ from .wall import bench_with_wall
 
 logger = logging.getLogger(__name__)
 
-device = "cuda:0" if IS_CUDA else "npu" if IS_NPU else "mps:0"
+device = None  # Resolve the default device only when benchmarking.
 
 
 def do_bench(
@@ -176,7 +176,11 @@ def _normalize_cuda_device(benchmark_device: int | torch.device | None) -> int |
 
 def _cache_device(device_idx: int | torch.device | None) -> str | torch.device:
     if device_idx is None:
-        return device
+        if device is not None:
+            return device
+        from tilelang.utils.device import IS_CUDA, IS_NPU
+
+        return "cuda:0" if IS_CUDA else "npu" if IS_NPU else "mps:0"
     if isinstance(device_idx, torch.device):
         return device_idx
     return torch.device("cuda", device_idx)

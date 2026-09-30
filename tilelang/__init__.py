@@ -157,7 +157,9 @@ def _lazy_load_lib():
 
 # Skip heavy imports in light import mode
 if not env.is_light_import():
-    with _lazy_load_lib():
+    from ._torch_dlpack import defer_torch_c_dlpack
+
+    with _lazy_load_lib(), defer_torch_c_dlpack():
         from .env import (  # noqa: F401
             enable_cache,
             disable_cache,

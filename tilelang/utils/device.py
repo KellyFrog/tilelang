@@ -2,38 +2,56 @@ import os
 
 import torch
 
-IS_CUDA = torch.cuda.is_available()
 
-IS_NPU = False
-try:
-    if not hasattr(torch, "npu"):
-        import torch_npu  # noqa: F401
-    IS_NPU = hasattr(torch, "npu") and torch.npu.is_available()
-except ImportError:
+def _initialize_device():
+    global IS_CUDA, IS_NPU, IS_MPS, _Event
+    if "_Event" in globals():
+        return
+    IS_CUDA = torch.cuda.is_available()
+
     IS_NPU = False
-except Exception as e:
-    print(f"An unexpected error occurred while checking NPU availability: {e}")
+    try:
+        if not hasattr(torch, "npu"):
+            import torch_npu  # noqa: F401
+        IS_NPU = hasattr(torch, "npu") and torch.npu.is_available()
+    except ImportError:
+        IS_NPU = False
+    except Exception as e:
+        print(f"An unexpected error occurred while checking NPU availability: {e}")
 
-IS_MPS = False
-try:
-    IS_MPS = torch.backends.mps.is_available()
-except AttributeError:
-    print("MPS backend is not available in this PyTorch build.")
-except Exception as e:
-    print(f"An unexpected error occurred while checking MPS availability: {e}")
+    IS_MPS = False
+    try:
+        IS_MPS = torch.backends.mps.is_available()
+    except AttributeError:
+        print("MPS backend is not available in this PyTorch build.")
+    except Exception as e:
+        print(f"An unexpected error occurred while checking MPS availability: {e}")
+
+    if IS_CUDA:
+        _Event = torch.cuda.Event
+    elif IS_NPU:
+        _Event = torch.npu.Event
+    elif IS_MPS:
+        _Event = torch.mps.Event
+    else:
+        _Event = None
 
 
-if IS_CUDA:
-    Event = torch.cuda.Event
-elif IS_NPU:
-    Event = torch.npu.Event
-elif IS_MPS:
-    Event = torch.mps.Event
-else:
-    Event = None
+def __getattr__(name):
+    if name in ("IS_CUDA", "IS_NPU", "IS_MPS"):
+        _initialize_device()
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def Event(*args, **kwargs):
+    """Create an event, resolving the available device on first use."""
+    _initialize_device()
+    return _Event(*args, **kwargs)
 
 
 def get_current_device():
+    _initialize_device()
     device = None
     if IS_CUDA:
         device = torch.cuda.current_device()
@@ -48,6 +66,7 @@ def get_current_device():
 def device_synchronize(device: int | torch.device | None = None) -> None:
     """Synchronize CUDA/HIP, MPS, or NPU, preferring CUDA when no device is given."""
     if device is None:
+        _initialize_device()
         if IS_CUDA:
             torch.cuda.synchronize()
         elif IS_NPU:
