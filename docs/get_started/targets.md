@@ -74,6 +74,18 @@ target = {"kind": "cuda", "arch": "sm_100f", "code": ["sm_100a", "sm_103a"]}
 kernel = tilelang.compile(func, target=target)
 ```
 
+An explicit CUDA target with `arch` determines compiler capability checks and
+source generation independently of the locally available GPU. Use
+`tilelang.lower` inside the corresponding `tvm.target.Target` context for
+source-only compilation. The `auto` target and bare `cuda` target may query the
+runtime to discover an architecture. Loading and running a compiled kernel
+still requires a compatible device.
+
+Profiling selects a runtime device separately: pass `device=torch.device("cuda:3")`
+(or an MPS/NPU device) to `do_bench`. Events, synchronization, and cache buffers
+use that device. With no device argument, accelerator timing discovers an
+available backend when benchmarking starts and uses its current device.
+
 ## CUDA `arch` and `code`
 
 For CUDA targets, `arch` selects the SM family TileLang/TVM should compile for. TileLang accepts `sm_...` architecture

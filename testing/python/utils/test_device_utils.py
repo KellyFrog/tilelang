@@ -44,10 +44,9 @@ def test_device_compatibility(monkeypatch, cuda_available, npu_available, mps_av
 
     namespace = runpy.run_path(device_utils.__file__)
 
-    assert namespace["IS_CUDA"] is cuda_available
-    assert namespace["IS_NPU"] is npu_available
-    assert namespace["IS_MPS"] is mps_available
-    assert namespace["Event"] is {"cuda": cuda_event, "npu": npu_event, "mps": mps_event, None: None}[expected_backend]
+    for name, expected in (("IS_CUDA", cuda_available), ("IS_NPU", npu_available), ("IS_MPS", mps_available)):
+        with pytest.warns(DeprecationWarning):
+            assert namespace["__getattr__"](name) is expected
     assert namespace["get_current_device"]() == expected_device
     cuda_event.assert_not_called()
     npu_event.assert_not_called()
@@ -87,8 +86,7 @@ def test_device_compatibility(monkeypatch, cuda_available, npu_available, mps_av
 def test_device_synchronize_explicit_device(monkeypatch, device, backend):
     cuda_sync = Mock()
     mps_sync = Mock()
-    monkeypatch.setattr(device_utils, "IS_CUDA", backend != "cuda")
-    monkeypatch.setattr(device_utils, "IS_MPS", backend != "mps")
+    monkeypatch.setattr(device_utils, "_is_available", lambda _: pytest.fail("Explicit devices must not probe availability"))
     monkeypatch.setattr(torch.cuda, "synchronize", cuda_sync)
     monkeypatch.setattr(torch.mps, "synchronize", mps_sync)
 
@@ -120,3 +118,31 @@ def test_profiler_uses_shared_device_helpers():
     assert torch_bench.Event is device_utils.Event
     assert bench._cuda_synchronize is device_utils.device_synchronize
     assert torch_bench._cuda_synchronize is device_utils.device_synchronize
+
+
+@pytest.mark.parametrize("device", [2, "cuda:2", torch.device("cuda:2"), "mps"])
+def test_explicit_device_does_not_probe(monkeypatch, device):
+    def unexpected(*args, **kwargs):
+        pytest.fail("Explicit devices must not discover or initialize devices")
+
+    monkeypatch.setattr(device_utils, "_is_available", unexpected)
+    monkeypatch.setattr(torch.cuda, "current_device", unexpected)
+    event = Mock()
+    expected = torch.device("cuda:2") if device != "mps" else torch.device("mps")
+    monkeypatch.setattr(getattr(torch, expected.type), "Event", event)
+    assert device_utils.resolve_device(device) == expected
+    device_utils.Event(enable_timing=True, device=device)
+    event.assert_called_once_with(enable_timing=True)
+
+
+def test_device_helpers_import_without_discovery(monkeypatch):
+    def unexpected(*args, **kwargs):
+        pytest.fail("Device helpers must not probe at import")
+
+    monkeypatch.setattr(torch.cuda, "is_available", unexpected)
+    monkeypatch.setattr(torch.backends.mps, "is_available", unexpected)
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(is_available=unexpected), raising=False)
+    namespace = runpy.run_path(device_utils.__file__)
+    assert "IS_CUDA" not in namespace
+    assert "IS_NPU" not in namespace
+    assert "IS_MPS" not in namespace

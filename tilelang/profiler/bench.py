@@ -11,7 +11,7 @@ from typing import Literal
 
 import torch
 
-from tilelang.utils.device import IS_CUDA, IS_NPU, Event, device_synchronize
+from tilelang.utils.device import Event, device_synchronize, resolve_device
 
 from .torch_bench import (
     _CACHE_FLUSH_ID as _CACHE_FLUSH_ID,
@@ -24,8 +24,6 @@ from .torch_bench import (
 from .wall import bench_with_wall
 
 logger = logging.getLogger(__name__)
-
-device = "cuda:0" if IS_CUDA else "npu" if IS_NPU else "mps:0"
 
 
 def do_bench(
@@ -121,65 +119,26 @@ def do_bench(
 
     assert return_mode in ["min", "max", "mean", "median"], f"Invalid return_mode: {return_mode}"
 
-    if device is not None and not isinstance(device, int) and torch.device(device).type in ("mps", "npu"):
-        device_idx = torch.device(device)
-    else:
-        device_idx = _normalize_cuda_device(device)
-    if isinstance(device_idx, int) or (isinstance(device_idx, torch.device) and device_idx.type == "npu"):
-        device_context = torch.cuda.device(device_idx) if isinstance(device_idx, int) else torch.npu.device(device_idx)
-        with device_context:
-            return _do_bench_impl(
-                fn,
-                warmup=warmup,
-                rep=rep,
-                _n_warmup=_n_warmup,
-                _n_repeat=_n_repeat,
-                quantiles=quantiles,
-                fast_flush=fast_flush,
-                backend=backend,
-                return_mode=return_mode,
-                device_idx=device_idx,
-                cache_size=cache_size,
-                early_stop_baseline=early_stop_baseline,
-            )
-
-    return _do_bench_impl(
-        fn,
-        warmup=warmup,
-        rep=rep,
-        _n_warmup=_n_warmup,
-        _n_repeat=_n_repeat,
-        quantiles=quantiles,
-        fast_flush=fast_flush,
-        backend=backend,
-        return_mode=return_mode,
-        device_idx=device_idx,
-        cache_size=cache_size,
-        early_stop_baseline=early_stop_baseline,
+    resolved_device = resolve_device(device)
+    device_idx = resolved_device.index if resolved_device.type == "cuda" else resolved_device
+    device_context = (
+        getattr(torch, resolved_device.type).device(resolved_device) if resolved_device.type in ("cuda", "npu") else nullcontext()
     )
-
-
-def _normalize_cuda_device(benchmark_device: int | torch.device | None) -> int | None:
-    """Return a concrete CUDA device index, preserving implicit mode for None."""
-    if benchmark_device is None:
-        return None
-    if isinstance(benchmark_device, int):
-        return benchmark_device
-
-    torch_device = torch.device(benchmark_device)
-    if torch_device.type != "cuda":
-        raise ValueError(f"do_bench device must be a CUDA device, got {torch_device}")
-    if torch_device.index is None:
-        return torch.cuda.current_device()
-    return torch_device.index
-
-
-def _cache_device(device_idx: int | torch.device | None) -> str | torch.device:
-    if device_idx is None:
-        return device
-    if isinstance(device_idx, torch.device):
-        return device_idx
-    return torch.device("cuda", device_idx)
+    with device_context:
+        return _do_bench_impl(
+            fn,
+            warmup=warmup,
+            rep=rep,
+            _n_warmup=_n_warmup,
+            _n_repeat=_n_repeat,
+            quantiles=quantiles,
+            fast_flush=fast_flush,
+            backend=backend,
+            return_mode=return_mode,
+            device_idx=device_idx,
+            cache_size=cache_size,
+            early_stop_baseline=early_stop_baseline,
+        )
 
 
 def _do_bench_impl(
@@ -192,12 +151,13 @@ def _do_bench_impl(
     fast_flush: bool,
     backend: Literal["event", "cupti", "cudagraph", "msprof", "msprof_detail"],
     return_mode: Literal["min", "max", "mean", "median"],
-    device_idx: int | torch.device | None,
+    device_idx: int | torch.device,
     cache_size: int,
     early_stop_baseline: float | None = None,
 ) -> float | list[float]:
+    cache_device = torch.device("cuda", device_idx) if isinstance(device_idx, int) else device_idx
     if backend in ("cupti", "cudagraph"):
-        cache_device_type = torch.device(_cache_device(device_idx)).type
+        cache_device_type = cache_device.type
         if cache_device_type == "mps":
             raise ValueError(f'{backend} timing requires CUDA/HIP; use "event" or "wall" for MPS')
         if cache_device_type == "npu":
@@ -212,7 +172,7 @@ def _do_bench_impl(
     cache_bytes = cache_size * 1024 * 1024
     cache_numel = cache_bytes // 4 if fast_flush else cache_bytes
     cache_dtype = torch.int if fast_flush else torch.int8
-    cache = torch.empty(cache_numel, dtype=cache_dtype, device=_cache_device(device_idx))
+    cache = torch.empty(cache_numel, dtype=cache_dtype, device=cache_device)
 
     # Warm the flush buffer once outside the timed estimate: the first
     # kernel launch may pay one-time backend init (e.g. ~250 ms on torch_npu).
@@ -220,8 +180,8 @@ def _do_bench_impl(
     _cuda_synchronize(device_idx)
 
     # Estimate kernel runtime with 5 iterations
-    start_event = Event(enable_timing=True)
-    end_event = Event(enable_timing=True)
+    start_event = Event(enable_timing=True, device=cache_device)
+    end_event = Event(enable_timing=True, device=cache_device)
     start_event.record()
     for _ in range(5):
         cache.zero_()

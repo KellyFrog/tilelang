@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 import tilelang
+import tilelang.testing
 from tilelang.backend import get_backend
 from tvm.target import Target
 import tilelang.backend.target as target_registry
@@ -135,3 +136,49 @@ def test_execution_backend_registry_rejects_removed_dlpack_backend():
 
     with pytest.raises(ValueError, match="Invalid execution backend 'dlpack'"):
         backend.resolve_execution_backend("dlpack", target)
+
+
+@pytest.mark.parametrize("arch, expected", [("sm_61", False), ("sm_80", True), ("sm_90a", True), ("sm_100f", True)])
+def test_cuda_capabilities_use_explicit_arch_without_device_probes(monkeypatch, arch, expected):
+    import torch
+    from tilelang.contrib import nvcc
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Explicit CUDA targets must not query a runtime device")
+
+    monkeypatch.setattr(torch.cuda, "is_available", unexpected)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", unexpected)
+    monkeypatch.setattr(torch.cuda, "current_device", unexpected)
+    monkeypatch.setattr(tilelang.tvm, "cuda", unexpected)
+    target = determine_target({"kind": "cuda", "arch": arch}, return_object=True)
+    assert nvcc.have_tensorcore(target=target) is expected
+    assert nvcc.get_target_arch_and_code(target)[0] == arch.removeprefix("sm_")
+    with target:
+        assert nvcc.have_tensorcore() is expected
+
+
+@tilelang.testing.requires_cuda
+def test_explicit_cuda_targets_lower_without_device_probes(monkeypatch):
+    import torch
+    import tilelang.language as T
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Explicit-target source generation must not query runtime devices")
+
+    monkeypatch.setattr(torch.cuda, "is_available", unexpected)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", unexpected)
+    monkeypatch.setattr(torch.cuda, "current_device", unexpected)
+    monkeypatch.setattr(tilelang.tvm, "cuda", unexpected)
+
+    @T.prim_func
+    def copy(A: T.Tensor((128,), "float32"), B: T.Tensor((128,), "float32")):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                B[i] = A[i] + 1
+
+    # Resolve and lower multiple targets in one process, without cached device state.
+    for arch in ("sm_80", "sm_90a", "sm_100f"):
+        with Target({"kind": "cuda", "arch": arch}) as target:
+            artifact = tilelang.lower(copy, target=target)
+        assert str(artifact.target.attrs["arch"]) == arch
+        assert "__global__" in artifact.kernel_source

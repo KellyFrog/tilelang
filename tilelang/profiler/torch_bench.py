@@ -70,8 +70,8 @@ def bench_with_cuda_events(
 ) -> float | list[float]:
     """Benchmark using CUDA/HIP or MPS events for timing."""
     # Create timing events
-    start_events = [Event(enable_timing=True) for _ in range(n_repeat)]
-    end_events = [Event(enable_timing=True) for _ in range(n_repeat)]
+    start_events = [Event(enable_timing=True, device=cache.device) for _ in range(n_repeat)]
+    end_events = [Event(enable_timing=True, device=cache.device) for _ in range(n_repeat)]
 
     # Run benchmark iterations
     for i in range(n_repeat):

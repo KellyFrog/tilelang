@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from tilelang.profiler import bench, do_bench, torch_bench
+from tilelang.profiler import do_bench
 from tilelang.utils import device as device_utils
 
 
@@ -36,17 +36,13 @@ def metal_events(monkeypatch):
     def empty(numel, *, dtype, device):
         assert torch.device(device).type == "mps"
         state.allocations.append((numel, dtype, torch.device(device)))
-        return SimpleNamespace(zero_=flush)
+        return SimpleNamespace(zero_=flush, device=torch.device(device))
 
     def unexpected(*args, **kwargs):
         raise AssertionError("MPS event timing must not use CUDA APIs")
 
-    for module in (bench, torch_bench, device_utils):
-        monkeypatch.setattr(module, "Event", Event)
-    monkeypatch.setattr(bench, "device", "mps:0")
-    monkeypatch.setattr(device_utils, "IS_CUDA", False)
-    monkeypatch.setattr(device_utils, "IS_NPU", False)
-    monkeypatch.setattr(device_utils, "IS_MPS", True)
+    monkeypatch.setattr(torch.mps, "Event", Event)
+    monkeypatch.setattr(device_utils, "_is_available", lambda kind: kind == "mps")
     monkeypatch.setattr(torch.mps, "synchronize", synchronize)
     monkeypatch.setattr(torch, "empty", empty)
     for name in ("Event", "device", "synchronize", "current_device", "Stream", "CUDAGraph"):
@@ -66,7 +62,9 @@ def metal_events(monkeypatch):
         ("mean", [0.25, 0.75], [1.5, 2.5]),
     ],
 )
-def test_event_metal_timing(metal_events, device, return_mode, quantiles, expected):
+def test_event_metal_timing(monkeypatch, metal_events, device, return_mode, quantiles, expected):
+    if device is not None:
+        monkeypatch.setattr(device_utils, "_is_available", lambda _: pytest.fail("Explicit devices must not probe availability"))
     durations = iter([1.0] * 8 + [1.0, 2.0, 3.0])
 
     def function():
@@ -90,7 +88,7 @@ def test_event_metal_timing(metal_events, device, return_mode, quantiles, expect
     assert metal_events.synchronizations == 3
     assert metal_events.event_synchronizations == 2
     assert len(metal_events.events) == 8
-    cache_device = torch.device(device) if device is not None else torch.device("mps:0")
+    cache_device = torch.device(device) if device is not None else torch.device("mps")
     assert metal_events.allocations == [(1024 * 1024 // 4, torch.int, cache_device)]
 
 

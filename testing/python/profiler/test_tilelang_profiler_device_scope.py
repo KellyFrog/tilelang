@@ -64,12 +64,7 @@ def accelerator(monkeypatch):
         monkeypatch.setattr(api, "synchronize", synchronize)
         monkeypatch.setattr(api, "Event", Event)
         monkeypatch.setattr(torch, "empty", empty)
-        monkeypatch.setattr(device_utils, "IS_CUDA", device_type == "cuda")
-        monkeypatch.setattr(device_utils, "IS_NPU", device_type == "npu")
-        monkeypatch.setattr(device_utils, "IS_MPS", False)
-        monkeypatch.setattr(bench, "device", "cuda:0" if device_type == "cuda" else "npu")
-        for module in (bench, torch_bench, device_utils):
-            monkeypatch.setattr(module, "Event", Event)
+        monkeypatch.setattr(device_utils, "_is_available", lambda kind: kind == device_type)
         state.function = function
         return state
 
@@ -96,7 +91,7 @@ def test_cuda_scope_covers_shared_path_and_backend(monkeypatch, accelerator, bac
     assert state.calls == [selected] * 8
     assert state.events == [selected, selected]
     assert state.allocations == [torch.device("cuda", selected)]
-    device_idx = None if device is None else selected
+    device_idx = selected
     assert state.synchronizations == [(device_idx, selected)] * 2
     assert state.flushes == 6
     options = () if backend == "cupti" else (None, "mean", device_idx)
@@ -228,3 +223,19 @@ def test_npu_wall_synchronizes_selected_device(monkeypatch, accelerator):
     assert state.calls == [2] * 4
     assert state.synchronizations == [(torch.device("npu:2"), 2)] * 6
     assert not state.allocations
+
+
+def test_default_cuda_device_tracks_current_device(monkeypatch, accelerator):
+    state = accelerator("cuda")
+    probes = []
+
+    def available(kind):
+        probes.append(kind)
+        return kind == "cuda"
+
+    monkeypatch.setattr(device_utils, "_is_available", available)
+    for current in (0, 2):
+        state.current = current
+        assert bench.do_bench(state.function, _n_warmup=1, _n_repeat=2) == 4.0
+    assert state.allocations == [torch.device("cuda:0"), torch.device("cuda:2")]
+    assert probes == ["cuda", "cuda"]

@@ -1,63 +1,74 @@
+"""Runtime device helpers. Importing this module does not discover devices."""
+
 import os
+import warnings
 
 import torch
 
-IS_CUDA = torch.cuda.is_available()
 
-IS_NPU = False
-try:
-    if not hasattr(torch, "npu"):
-        import torch_npu  # noqa: F401
-    IS_NPU = hasattr(torch, "npu") and torch.npu.is_available()
-except ImportError:
-    IS_NPU = False
-except Exception as e:
-    print(f"An unexpected error occurred while checking NPU availability: {e}")
-
-IS_MPS = False
-try:
-    IS_MPS = torch.backends.mps.is_available()
-except AttributeError:
-    print("MPS backend is not available in this PyTorch build.")
-except Exception as e:
-    print(f"An unexpected error occurred while checking MPS availability: {e}")
+def _is_available(device_type: str) -> bool:
+    if device_type == "npu" and not hasattr(torch, "npu"):
+        try:
+            import torch_npu  # noqa: F401
+        except ImportError:
+            return False
+    api = torch.backends.mps if device_type == "mps" else getattr(torch, device_type, None)
+    return api is not None and api.is_available()
 
 
-if IS_CUDA:
-    Event = torch.cuda.Event
-elif IS_NPU:
-    Event = torch.npu.Event
-elif IS_MPS:
-    Event = torch.mps.Event
-else:
-    Event = None
+def __getattr__(name):
+    # Compatibility only: internal callers pass devices explicitly. Do not cache
+    # runtime availability or select an event class as a side effect of import.
+    if name in ("IS_CUDA", "IS_NPU", "IS_MPS"):
+        warnings.warn(f"{name} is deprecated; pass an explicit device instead", DeprecationWarning, stacklevel=2)
+        return _is_available(name.removeprefix("IS_").lower())
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def get_current_device():
-    device = None
-    if IS_CUDA:
-        device = torch.cuda.current_device()
-    elif IS_NPU:
-        device = torch.npu.current_device()
-    elif IS_MPS:
-        device = "mps:0"
+def resolve_device(device: int | str | torch.device | None = None) -> torch.device:
+    """Resolve a runtime device; only omitted devices require availability probes.
 
+    CUDA/HIP, NPU, then MPS is the default discovery order. Indexed devices
+    bypass discovery and current-device queries; unindexed CUDA/HIP and NPU
+    devices use their runtime's current device.
+    """
+    if device is None:
+        for device_type in ("cuda", "npu", "mps"):
+            if _is_available(device_type):
+                device = torch.device(device_type)
+                break
+        else:
+            raise RuntimeError("No device is available")
+    device = torch.device("cuda", device) if isinstance(device, int) else torch.device(device)
+    if device.type not in ("cuda", "npu", "mps"):
+        raise ValueError(f"Expected a CUDA/HIP, MPS, or NPU device, got {device}")
+    if device.index is None and device.type in ("cuda", "npu"):
+        device = torch.device(device.type, getattr(torch, device.type).current_device())
     return device
 
 
-def device_synchronize(device: int | torch.device | None = None) -> None:
-    """Synchronize CUDA/HIP, MPS, or NPU, preferring CUDA when no device is given."""
-    if device is None:
-        if IS_CUDA:
-            torch.cuda.synchronize()
-        elif IS_NPU:
-            torch.npu.synchronize()
-        elif IS_MPS:
-            torch.mps.synchronize()
-        else:
-            raise RuntimeError("No device is available")
-        return
+def Event(*args, device: int | str | torch.device | None = None, **kwargs):
+    """Create an event for the selected runtime backend."""
+    device = resolve_device(device)
+    return getattr(torch, device.type).Event(*args, **kwargs)
 
+
+def get_current_device():
+    """Legacy current-device query, preserving integer CUDA/HIP and NPU results."""
+    for device_type in ("cuda", "npu", "mps"):
+        if _is_available(device_type):
+            return "mps:0" if device_type == "mps" else getattr(torch, device_type).current_device()
+    return None
+
+
+def device_synchronize(device: int | str | torch.device | None = None) -> None:
+    """Synchronize the selected runtime backend."""
+    if device is None:
+        for device_type in ("cuda", "npu", "mps"):
+            if _is_available(device_type):
+                getattr(torch, device_type).synchronize()
+                return
+        raise RuntimeError("No device is available")
     device_type = "cuda" if isinstance(device, int) else torch.device(device).type
     if device_type == "cuda":
         torch.cuda.synchronize(device)
